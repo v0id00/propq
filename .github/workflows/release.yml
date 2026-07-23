@@ -68,7 +68,7 @@ jobs:
           - name: linux-amd64
             goos: linux
             goarch: amd64
-          - name: linux-386
+          - name: linux-x86
             goos: linux
             goarch: 386
           - name: linux-arm64
@@ -83,7 +83,7 @@ jobs:
           - name: windows-amd64
             goos: windows
             goarch: amd64
-          - name: windows-386
+          - name: windows-x86
             goos: windows
             goarch: 386
 

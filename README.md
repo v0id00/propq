@@ -44,8 +44,8 @@ curl -L https://github.com/v0id00/propq/releases/latest/download/propq-linux-amd
 chmod +x propq
 ./propq --version
 
-# Linux 32-bit
-curl -L https://github.com/v0id00/propq/releases/latest/download/propq-linux-386 -o propq
+# Linux 32-bit (x86)
+curl -L https://github.com/v0id00/propq/releases/latest/download/propq-linux-x86 -o propq
 chmod +x propq
 
 # macOS (Intel)
@@ -60,7 +60,7 @@ chmod +x propq
 curl -L https://github.com/v0id00/propq/releases/latest/download/propq-windows-amd64.exe -o propq.exe
 
 # Windows 32-bit
-curl -L https://github.com/v0id00/propq/releases/latest/download/propq-windows-386.exe -o propq.exe
+curl -L https://github.com/v0id00/propq/releases/latest/download/propq-windows-x86.exe -o propq.exe
 ```
 
 ### Build from source
