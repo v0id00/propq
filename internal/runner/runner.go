@@ -63,8 +63,9 @@ type RunConfig struct {
 	Force       bool
 	NoTxn       bool
 	Filter      FilterConfig
-	ShowBar     bool // show progress bar
-	Targets     []Target // pre-filtered targets (if set, skips fetch+filter)
+	ShowBar     bool        // show progress bar
+	Targets     []Target    // pre-filtered targets (if set, skips fetch+filter)
+	Once        bool        // run once per server, not per database
 }
 
 // Run executes the SQL on all matching databases.
@@ -74,9 +75,20 @@ func Run(conns []config.Connection, sqlContent string, cfg RunConfig) ([]Result,
 		timeout = 30
 	}
 
+	var filtered []config.Connection
+
+	// ── Once mode: run SQL once per server (no per-DB iteration) ──
+	if cfg.Once {
+		filtered = filterServers(conns, cfg.Filter.ServerRegex)
+		if len(filtered) == 0 {
+			return nil, fmt.Errorf("no servers match filter: %s", cfg.Filter.ServerRegex)
+		}
+		return runOncePerServer(filtered, sqlContent, cfg, timeout)
+	}
+
+	// ── Normal (per-database) mode ──
 	// If pre-filtered targets provided, use them directly
 	var targets []target
-	var filtered []config.Connection
 
 	if cfg.Targets != nil {
 		for _, t := range cfg.Targets {
@@ -148,18 +160,7 @@ func Run(conns []config.Connection, sqlContent string, cfg RunConfig) ([]Result,
 
 	// Progress bar
 	totalTasks := len(targets)
-	var bar *progressbar.ProgressBar
-	if cfg.ShowBar && totalTasks > 0 && isTerminal() {
-		bar = progressbar.NewOptions(totalTasks,
-			progressbar.OptionSetDescription(" Executing"),
-			progressbar.OptionSetWriter(os.Stderr),
-			progressbar.OptionShowCount(),
-			progressbar.OptionThrottle(65*time.Millisecond),
-			progressbar.OptionSpinnerType(14),
-			progressbar.OptionFullWidth(),
-			progressbar.OptionSetRenderBlankState(true),
-		)
-	}
+	bar := buildProgressBar(totalTasks, cfg.ShowBar, "Executing")
 
 	// Channels for cancellation and results
 	ctx, cancel := context.WithCancel(context.Background())
@@ -477,8 +478,132 @@ func HasDestructiveKeywords(sql string) bool {
 	return false
 }
 
+// runOncePerServer connects to each server once (without selecting a DB)
+// and executes the SQL. Returns one result per server.
+func runOncePerServer(conns []config.Connection, sqlContent string, cfg RunConfig, timeout int) ([]Result, error) {
+	// Build per-server semaphores
+	type semSlot struct {
+		ch chan struct{}
+	}
+	serverSems := make(map[string]*semSlot, len(conns))
+	for _, c := range conns {
+		maxConn := c.MaxConnections
+		if cfg.Concurrency > 0 && cfg.Concurrency < maxConn {
+			maxConn = cfg.Concurrency
+		}
+		serverSems[c.Name] = &semSlot{ch: make(chan struct{}, maxConn)}
+	}
+
+	// Progress bar
+	bar := buildProgressBar(len(conns), cfg.ShowBar, " Servers")
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	resultCh := make(chan Result, len(conns))
+	var wg sync.WaitGroup
+
+	for _, c := range conns {
+		wg.Add(1)
+		go func(conn config.Connection) {
+			defer wg.Done()
+			defer func() {
+				if bar != nil {
+					bar.Add(1)
+				}
+			}()
+
+			slot := serverSems[conn.Name]
+			slot.ch <- struct{}{}
+			defer func() { <-slot.ch }()
+
+			select {
+			case <-ctx.Done():
+				resultCh <- Result{Server: conn.Name, Database: "*", Status: StatusSkip}
+				return
+			default:
+			}
+
+			if cfg.DryRun {
+				resultCh <- Result{Server: conn.Name, Database: "*", Status: StatusOK}
+				return
+			}
+
+			start := time.Now()
+
+			// Connect without selecting a database
+			dsn := fmt.Sprintf("%s:%s@tcp(%s:%d)/?timeout=%ds&readTimeout=%ds&writeTimeout=%ds&multiStatements=true",
+				conn.User, conn.Password, conn.Host, conn.Port, timeout, timeout, timeout)
+
+			db, err := sql.Open("mysql", dsn)
+			if err != nil {
+				resultCh <- Result{
+					Server: conn.Name, Database: "*", Status: StatusError,
+					Error: fmt.Sprintf("connect: %v", err), Elapsed: time.Since(start).Round(time.Millisecond).String(),
+				}
+				return
+			}
+			db.SetConnMaxLifetime(time.Duration(timeout) * time.Second)
+			db.SetMaxOpenConns(1)
+
+			queryCtx, cancel2 := context.WithTimeout(ctx, time.Duration(timeout)*time.Second)
+			defer cancel2()
+
+			res, err := db.ExecContext(queryCtx, sqlContent)
+			if err != nil {
+				resultCh <- Result{
+					Server: conn.Name, Database: "*", Status: StatusError,
+					Error: fmt.Sprintf("execute: %v", err), Elapsed: time.Since(start).Round(time.Millisecond).String(),
+				}
+				db.Close()
+				return
+			}
+			db.Close()
+
+			affected, _ := res.RowsAffected()
+			resultCh <- Result{
+				Server: conn.Name, Database: "*", Status: StatusOK,
+				Affected: affected, Elapsed: time.Since(start).Round(time.Millisecond).String(),
+			}
+		}(c)
+	}
+
+	go func() {
+		wg.Wait()
+		close(resultCh)
+	}()
+
+	var results []Result
+	for r := range resultCh {
+		results = append(results, r)
+	}
+
+	if bar != nil {
+		bar.Finish()
+		fmt.Fprintln(os.Stderr)
+	}
+
+	return results, nil
+}
+
+// buildProgressBar creates a new progress bar if conditions are met.
+func buildProgressBar(total int, show bool, label string) *progressbar.ProgressBar {
+	if !show || total == 0 || !isTerminal() {
+		return nil
+	}
+	return progressbar.NewOptions(total,
+		progressbar.OptionSetDescription(" "+label),
+		progressbar.OptionSetWriter(os.Stderr),
+		progressbar.OptionShowCount(),
+		progressbar.OptionThrottle(65*time.Millisecond),
+		progressbar.OptionSpinnerType(14),
+		progressbar.OptionFullWidth(),
+		progressbar.OptionSetRenderBlankState(true),
+	)
+}
+
 // isTerminal returns true if stderr is a terminal (for progress bar).
 func isTerminal() bool {
 	stat, _ := os.Stderr.Stat()
-	return (stat.Mode()&os.ModeCharDevice) != 0
+	return (stat.Mode() & os.ModeCharDevice) != 0
 }
