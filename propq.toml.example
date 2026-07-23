@@ -1,0 +1,54 @@
+# propq.toml — Async SQL executor configuration
+#
+# All execution behaviour can be set here.
+# CLI flags override these values when explicitly provided.
+#
+# Copy this file to ./propq.toml or ~/.config/propq/config.toml
+
+[defaults]
+# Connection / execution
+timeout = 30                # Query timeout in seconds (default: 30)
+concurrency = 10            # Global concurrency limit (0 = per-server max_connections)
+no_transaction = false      # Run in autocommit mode (default: false, uses transaction)
+
+# Safety
+force = false               # Allow destructive SQL (DROP/TRUNCATE/DELETE/ALTER) without --force
+dry_run = false             # Preview targets without executing
+
+# Output
+json = false                # Output as JSON (default: table)
+quiet = false               # Suppress progress bar and banners
+
+# Default filters (applied when CLI flags are absent)
+server = ""                 # Default regex filter for server names
+dbfilter = ""               # Default regex filter for database names
+exclude_db = ""             # Default regex to exclude databases
+
+# When no --dbfilter / --exclude-db is set (neither via CLI nor config),
+# prompt for confirmation before targeting ALL databases.
+# Set to false to run directly without asking.
+confirm_without_filter = true
+
+[connections.prod-eu-1]
+host = "db1.example.com"
+port = 3306
+user = "myuser"
+password = "mypassword"
+max_connections = 3
+tags = ["prod", "eu"]
+
+[connections.prod-eu-2]
+host = "db2.example.com"
+port = 3306
+user = "myuser"
+password = "mypassword"
+max_connections = 2
+tags = ["prod", "eu"]
+
+[connections.staging]
+host = "staging.example.com"
+port = 3306
+user = "testuser"
+password = "testpass"
+# max_connections defaults to 3
+# tags defaults to []
