@@ -98,7 +98,7 @@ SQL sources (in priority order):
 	// Filtering
 	flags.StringVarP(&ac.server, "server", "s", "", "Regex filter for server names")
 	flags.StringVarP(&ac.dbfilter, "dbfilter", "d", "", "Regex filter for database names")
-	flags.StringVar(&ac.excludeDB, "exclude-db", "", "Regex to exclude databases")
+	flags.StringVarP(&ac.excludeDB, "exclude-db", "D", "", "Regex to exclude databases (inverse of -d)")
 
 	// Execution
 	flags.IntVar(&ac.timeout, "timeout", 0, "Query timeout in seconds (default: 30)")
