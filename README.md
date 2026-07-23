@@ -43,6 +43,17 @@ Download the latest binary for your platform from the [releases page](https://gi
 curl -L https://github.com/v0id00/propq/releases/latest/download/propq-linux-amd64 -o propq
 chmod +x propq
 ./propq --version
+
+# macOS (Intel)
+curl -L https://github.com/v0id00/propq/releases/latest/download/propq-macos-amd64 -o propq
+chmod +x propq
+
+# macOS (Apple Silicon)
+curl -L https://github.com/v0id00/propq/releases/latest/download/propq-macos-arm64 -o propq
+chmod +x propq
+
+# Windows
+curl -L https://github.com/v0id00/propq/releases/latest/download/propq-windows-amd64.exe -o propq.exe
 ```
 
 ### Build from source

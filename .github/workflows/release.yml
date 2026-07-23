@@ -71,12 +71,15 @@ jobs:
           - name: linux-arm64
             goos: linux
             goarch: arm64
-          - name: darwin-amd64
+          - name: macos-amd64
             goos: darwin
             goarch: amd64
-          - name: darwin-arm64
+          - name: macos-arm64
             goos: darwin
             goarch: arm64
+          - name: windows-amd64
+            goos: windows
+            goarch: amd64
 
     steps:
       - name: Checkout
@@ -94,8 +97,10 @@ jobs:
           export GOOS=${{ matrix.os.goos }}
           export GOARCH=${{ matrix.os.goarch }}
           export VERSION=$(git describe --tags --always 2>/dev/null || echo dev)
+          EXT=""
+          [ "$GOOS" = "windows" ] && EXT=".exe"
           go build -ldflags="-X 'github.com/v0id00/propq/internal/app.version=${VERSION}'" \
-            -o "dist/propq-${{ matrix.os.name }}" ./cmd/propq/
+            -o "dist/propq-${{ matrix.os.name }}${EXT}" ./cmd/propq/
 
       - name: Checksum
         run: |
