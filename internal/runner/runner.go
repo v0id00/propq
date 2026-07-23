@@ -68,6 +68,8 @@ type RunConfig struct {
 	All         bool        // run on ALL databases (per-DB mode); default: once per server
 	Stream      bool         // print results live as they complete
 	OnResult    func(Result) // optional callback for each result (streaming)
+	AskCommit   bool        // per-target confirmation before executing
+	SQLText     string      // SQL text shown in ask-commit prompt
 }
 
 // Run executes the SQL on all matching databases.
@@ -134,6 +136,11 @@ func Run(conns []config.Connection, sqlContent string, cfg RunConfig) ([]Result,
 
 	if len(targets) == 0 {
 		return nil, fmt.Errorf("no databases match the filters")
+	}
+
+	// AskCommit + All mode: sequential per-database with confirmation
+	if cfg.AskCommit && cfg.All {
+		return runSequentialWithPrompt(targets, conns, sqlContent, cfg, timeout)
 	}
 
 	// Build connection map and per-server semaphores
@@ -536,6 +543,76 @@ func CountTargets(conns []config.Connection, filter FilterConfig, timeout int) (
 		labels = append(labels, fmt.Sprintf("%s.%s", t.server, t.database))
 	}
 	return labels, len(targets), nil
+}
+
+// runSequentialWithPrompt executes SQL on each target sequentially,
+// asking for confirmation before each one. Used by --ask-for-commit + --all.
+func runSequentialWithPrompt(targets []target, conns []config.Connection, sqlContent string, cfg RunConfig, timeout int) ([]Result, error) {
+	connMap := make(map[string]config.Connection, len(conns))
+	for _, c := range conns {
+		connMap[c.Name] = c
+	}
+
+	var results []Result
+	for _, t := range targets {
+		conn, ok := connMap[t.server]
+		if !ok {
+			results = append(results, Result{
+				Server: t.server, Database: t.database,
+				Status: StatusError, Error: fmt.Sprintf("unknown server: %s", t.server),
+			})
+			continue
+		}
+
+		// Show SQL and ask
+		label := fmt.Sprintf("%s.%s", t.server, t.database)
+		sqlPreview := strings.ReplaceAll(strings.TrimSpace(sqlContent), "\n", " ")
+		if len(sqlPreview) > 60 {
+			sqlPreview = sqlPreview[:57] + "..."
+		}
+		fmt.Fprintf(os.Stderr, "\n  ◇  %s\n     %s\n", label, sqlPreview)
+
+		if !promptYesNo("Execute on this database?") {
+			results = append(results, Result{
+				Server: t.server, Database: t.database,
+				Status: StatusSkip,
+			})
+			continue
+		}
+
+		// Execute with transaction (autocommit=false + manual commit)
+		start := time.Now()
+		r := executeOnDBLikeDBRunner(context.Background(), conn, t.database, sqlContent, timeout, false)
+		r.Server = conn.Name
+		r.Database = t.database
+		r.Elapsed = time.Since(start).Round(time.Millisecond).String()
+
+		// Print result immediately and clear rows for final summary
+		if r.Status == StatusOK && r.Rows != nil && len(r.Rows.Rows) > 0 {
+			fmt.Fprintf(os.Stderr, "  ✓ %s.%s (%d row(s))\n", r.Server, r.Database, len(r.Rows.Rows))
+			for _, row := range r.Rows.Rows {
+				fmt.Fprintf(os.Stderr, "    %s\n", strings.Join(row, " │ "))
+			}
+			r.Rows = nil // don't print again in final summary
+		} else if r.Status == StatusOK {
+			fmt.Fprintf(os.Stderr, "  ✓ %s.%s\n", r.Server, r.Database)
+		} else if r.Status == StatusError {
+			fmt.Fprintf(os.Stderr, "  ✗ %s.%s  %s\n", r.Server, r.Database, r.Error)
+		}
+
+		results = append(results, r)
+	}
+
+	return results, nil
+}
+
+// promptYesNo asks a simple y/n question on stderr.
+func promptYesNo(msg string) bool {
+	fmt.Fprintf(os.Stderr, "  %s [y/N] ", msg)
+	var resp string
+	fmt.Scanln(&resp)
+	resp = strings.TrimSpace(strings.ToLower(resp))
+	return resp == "y" || resp == "yes"
 }
 
 // HasDestructiveKeywords checks if SQL contains destructive operations.

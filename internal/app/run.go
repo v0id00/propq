@@ -602,29 +602,27 @@ func run(ac *appConfig, cmd *cobra.Command) error {
 
 	// 8. If --ask-for-commit: show targets, ask, then execute
 	if ac.askCommit {
-		var count int
-		var labels []string
-		if ac.all {
-			labels, count, err = runner.CountTargets(conns, filterCfg, ac.timeout)
-		} else {
+		if !ac.all {
+			// Per-server mode: show server list + SQL, ask once
+			var labels []string
 			for _, c := range conns {
 				if ac.server == "" || matchString(ac.server, c.Name) {
 					labels = append(labels, c.Name)
 				}
 			}
-			count = len(labels)
-			err = nil
+			sqlPreview := sqlInput.Content
+			if len(sqlPreview) > 60 {
+				sqlPreview = sqlPreview[:57] + "..."
+			}
+			display.PrintDryRun(labels)
+			display.PrintInfo(fmt.Sprintf("SQL: %s", sqlPreview))
+			display.PrintDBTarget(len(labels))
+			if !display.PromptYesNo("Commit changes to %d server(s)?", len(labels)) {
+				display.PrintCancelled()
+				return nil
+			}
 		}
-		if err != nil {
-			display.PrintError(err.Error())
-			return err
-		}
-		display.PrintDryRun(labels)
-		display.PrintDBTarget(count)
-		if !display.PromptYesNo("Commit changes to %d target(s)?", count) {
-			display.PrintCancelled()
-			return nil
-		}
+		// Per-DB mode: handled in runner.Run via AskCommit flag
 	}
 
 	// 9. Execute
@@ -642,6 +640,8 @@ func run(ac *appConfig, cmd *cobra.Command) error {
 		ShowBar:     !ac.noProgress && !ac.stream,
 		All:         ac.all,
 		Stream:      ac.stream,
+		AskCommit:   ac.askCommit,
+		SQLText:     sqlInput.Content,
 	}
 	if ac.stream {
 		runCfg.OnResult = display.PrintStreamResult
