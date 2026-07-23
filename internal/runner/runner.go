@@ -411,40 +411,22 @@ func executeOnDBLikeDBRunner(ctx context.Context, conn config.Connection, dbName
 		if err != nil {
 			return Result{Status: StatusError, Error: fmt.Sprintf("query: %v", err)}
 		}
-		defer rows.Close()
 
+		// Read first result set
 		columns, err := rows.Columns()
 		if err != nil {
+			rows.Close()
 			return Result{Status: StatusError, Error: fmt.Sprintf("columns: %v", err)}
 		}
 
-		var data [][]string
-		for rows.Next() {
-			vals := make([]interface{}, len(columns))
-			valPtrs := make([]interface{}, len(columns))
-			for i := range vals {
-				valPtrs[i] = &vals[i]
-			}
+		data := readRows(rows)
+		rows.Close()
 
-			if err := rows.Scan(valPtrs...); err != nil {
-				return Result{Status: StatusError, Error: fmt.Sprintf("scan: %v", err)}
-			}
-
-			row := make([]string, len(columns))
-			for i, v := range vals {
-				if v == nil {
-					row[i] = "NULL"
-				} else {
-					switch val := v.(type) {
-					case []byte:
-						row[i] = string(val)
-					default:
-						row[i] = fmt.Sprintf("%v", val)
-					}
-				}
-			}
-			data = append(data, row)
+		// Consume any remaining result sets (multiStatements)
+		for rows.NextResultSet() {
+			rows.Close()
 		}
+
 		if err := rows.Err(); err != nil {
 			return Result{Status: StatusError, Error: fmt.Sprintf("rows: %v", err)}
 		}
@@ -452,7 +434,6 @@ func executeOnDBLikeDBRunner(ctx context.Context, conn config.Connection, dbName
 		rr := &RowResult{Columns: columns, Rows: data}
 		affected := int64(len(data))
 
-		// Commit if transaction mode
 		if !noTxn {
 			db.ExecContext(ctx, "COMMIT")
 		}
@@ -472,6 +453,40 @@ func executeOnDBLikeDBRunner(ctx context.Context, conn config.Connection, dbName
 
 	affected, _ := res.RowsAffected()
 	return Result{Status: StatusOK, Affected: affected}
+}
+
+// readRows reads all rows from a result set into [][]string.
+func readRows(rows *sql.Rows) [][]string {
+	cols, _ := rows.Columns()
+	if cols == nil {
+		return nil
+	}
+	var data [][]string
+	for rows.Next() {
+		vals := make([]interface{}, len(cols))
+		valPtrs := make([]interface{}, len(cols))
+		for i := range vals {
+			valPtrs[i] = &vals[i]
+		}
+		if err := rows.Scan(valPtrs...); err != nil {
+			return data
+		}
+		row := make([]string, len(cols))
+		for i, v := range vals {
+			if v == nil {
+				row[i] = "NULL"
+			} else {
+				switch val := v.(type) {
+				case []byte:
+					row[i] = string(val)
+				default:
+					row[i] = fmt.Sprintf("%v", val)
+				}
+			}
+		}
+		data = append(data, row)
+	}
+	return data
 }
 
 // isSelectQuery returns true if the SQL is a SELECT-like query that returns rows.
