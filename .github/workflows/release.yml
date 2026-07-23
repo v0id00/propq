@@ -34,6 +34,7 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
         with:
+          repository: ${{ github.repository }}
           fetch-depth: 0
 
       - name: Setup Go
@@ -51,7 +52,7 @@ jobs:
         run: go test ./... -v -count=1
 
       - name: Build
-        run: go build -ldflags="-X 'github.com/v0id00/propq/internal/app.version=$(git describe --tags --always --dirty 2>/dev/null || echo dev)'" -o build/propq ./cmd/propq/
+        run: go build -ldflags="-X 'github.com/v0id00/propq/internal/app.version=$(git describe --tags --always --dirty 2>/dev/null || echo dev)'" -o build/propq cmd/propq/main.go
 
       - name: Binary check
         run: ./build/propq --version
@@ -91,15 +92,33 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
         with:
+          repository: ${{ github.repository }}
           fetch-depth: 0
 
       - name: Setup Go
         uses: actions/setup-go@v5
         with:
-          go-version-file: go.mod
+          go-version: "1.24"
 
       - name: Download dependencies
         run: go mod download
+
+      - name: Debug workspace
+        run: |
+          echo "=== Go ==="
+          go version
+          go env GOROOT GOPATH GOMOD
+          echo "=== Workspace ==="
+          echo "GITHUB_WORKSPACE=$GITHUB_WORKSPACE"
+          echo "PWD=$(pwd)"
+          ls -la
+          echo "=== cmd/propq ==="
+          ls -la cmd/propq/ || echo "MISSING"
+          echo "=== go.mod ==="
+          find . -name "go.mod" -maxdepth 3
+          echo "=== module ==="
+          head -3 go.mod
+        working-directory: ${{ github.workspace }}
 
       - name: Build (${{ matrix.os.name }})
         run: |
@@ -112,7 +131,7 @@ jobs:
           go build \
             -ldflags="-X 'github.com/v0id00/propq/internal/app.version=${VERSION}'" \
             -o "dist/propq-${{ matrix.os.name }}${EXT}" \
-            ./cmd/propq/
+            cmd/propq/main.go
         working-directory: ${{ github.workspace }}
 
       - name: Checksum
