@@ -2,11 +2,21 @@
 package app
 
 import (
+	"context"
+	"database/sql"
+	"encoding/json"
 	"fmt"
 	"os"
 	"os/signal"
+	"regexp"
+	"sort"
+	"strings"
+	"sync"
 	"syscall"
+	"text/tabwriter"
+	"time"
 
+	"github.com/fatih/color"
 	"github.com/spf13/cobra"
 	"github.com/v0id00/propq/internal/config"
 	"github.com/v0id00/propq/internal/display"
@@ -28,22 +38,22 @@ func Execute() {
 // appConfig holds all runtime configuration, sourced from CLI flags
 // with config file defaults merged in.
 type appConfig struct {
-	configPath string
-	sql        string
-	file       string
-	edit       bool
-	server     string
-	dbfilter   string
-	excludeDB  string
-	timeout    int
+	configPath  string
+	sql         string
+	file        string
+	edit        bool
+	server      string
+	dbfilter    string
+	excludeDB   string
+	timeout     int
 	concurrency int
-	force      bool
-	dryRun     bool
-	noTxn      bool
-	json       bool
-	noProgress bool
-	noConfirm  bool
-	version    bool
+	force       bool
+	dryRun      bool
+	noTxn       bool
+	json        bool
+	noProgress  bool
+	noConfirm   bool
+	version     bool
 }
 
 func newRootCmd() *cobra.Command {
@@ -68,9 +78,11 @@ SQL sources (in priority order):
 		Example: `  propq --sql "SELECT COUNT(*) FROM users" -s prod
   propq -f migration.sql -d "^shop_"
   echo "SELECT 1" | propq
-  propq -e`,
+  propq -e
+  propq servers`,
 		SilenceUsage:  true,
 		SilenceErrors: true,
+		Args:          cobra.ExactArgs(0),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			return run(ac, cmd)
 		},
@@ -106,8 +118,243 @@ SQL sources (in priority order):
 	// Misc
 	flags.BoolVar(&ac.version, "version", false, "Show version")
 
+	// Subcommands
+	cmd.AddCommand(newServersCmd())
+
 	return cmd
 }
+
+// ---------------------------------------------------------------------------
+// propq servers  —  list configured servers with database counts
+// ---------------------------------------------------------------------------
+
+func newServersCmd() *cobra.Command {
+	var (
+		cfgPath string
+		server  string
+		jsonOut bool
+		timeout int
+		quiet   bool
+	)
+
+	cmd := &cobra.Command{
+		Use:   "servers",
+		Short: "List configured servers and their database counts",
+		Long: `List all servers from the config file, connect to each one,
+and show how many databases they have.
+
+You can filter by server name regex with -s.
+
+Examples:
+  propq servers
+  propq servers -s "www1|www7"
+  propq servers --json`,
+		RunE: func(cmd *cobra.Command, args []string) error {
+			return runServers(cfgPath, server, jsonOut, timeout, quiet)
+		},
+	}
+
+	fl := cmd.Flags()
+	fl.StringVarP(&cfgPath, "config", "c", "", "Path to config file")
+	fl.StringVarP(&server, "server", "s", "", "Regex filter for server names")
+	fl.BoolVar(&jsonOut, "json", false, "JSON output")
+	fl.IntVar(&timeout, "timeout", 10, "Connection timeout in seconds")
+	fl.BoolVarP(&quiet, "quiet", "q", false, "Suppress banner")
+
+	return cmd
+}
+
+type serverInfo struct {
+	Name       string `json:"name"`
+	Host       string `json:"host"`
+	Port       int    `json:"port"`
+	Databases  int    `json:"databases"`
+	Error      string `json:"error,omitempty"`
+}
+
+func runServers(cfgPath, serverRegex string, jsonOut bool, timeout int, quiet bool) error {
+	resolved, err := config.FindConfigPath(cfgPath)
+	if err != nil {
+		display.PrintError(err.Error())
+		return err
+	}
+
+	cfg, err := config.Load(resolved)
+	if err != nil {
+		display.PrintError(fmt.Sprintf("config: %v", err))
+		return err
+	}
+
+	if !quiet {
+		display.PrintInfo(fmt.Sprintf("Config: %s\n", resolved))
+		display.PrintInfo(fmt.Sprintf("Servers: %d\n\n", len(cfg.Connections)))
+	}
+
+	// Filter servers
+	conns := make([]config.Connection, 0, len(cfg.Connections))
+	for _, c := range cfg.Connections {
+		conns = append(conns, c)
+	}
+
+	if serverRegex != "" {
+		conns = filterConnections(conns, serverRegex)
+		if len(conns) == 0 {
+			display.PrintError(fmt.Sprintf("no servers match: %s", serverRegex))
+			return fmt.Errorf("no servers match: %s", serverRegex)
+		}
+	}
+
+	// Fetch DB counts concurrently
+	results := fetchServerDBs(conns, timeout)
+
+	if jsonOut {
+		enc := json.NewEncoder(os.Stdout)
+		enc.SetIndent("", "  ")
+		enc.Encode(results)
+		return nil
+	}
+
+	// Table output
+	w := tabwriter.NewWriter(os.Stdout, 0, 0, 3, ' ', 0)
+	color.New(color.FgCyan, color.Bold).Fprintf(w, "Server\tHost\tPort\tDatabases\tStatus\n")
+	fmt.Fprintf(w, "------\t----\t----\t---------\t------\n")
+
+	okCount := 0
+	for _, r := range results {
+		if r.Error == "" {
+			okCount++
+			status := color.GreenString("✓")
+			fmt.Fprintf(w, "%s\t%s\t%d\t%d\t%s\n", r.Name, r.Host, r.Port, r.Databases, status)
+		} else {
+			status := color.RedString("✗ %s", r.Error)
+			fmt.Fprintf(w, "%s\t%s\t%d\t-\t%s\n", r.Name, r.Host, r.Port, status)
+		}
+	}
+	w.Flush()
+
+	fmt.Fprintf(os.Stdout, "\n%d/%d servers reachable\n", okCount, len(results))
+	return nil
+}
+
+func filterConnections(conns []config.Connection, regex string) []config.Connection {
+	re := compileRegex(regex)
+	if re == nil {
+		return conns
+	}
+	var filtered []config.Connection
+	for _, c := range conns {
+		if re.MatchString(c.Name) {
+			filtered = append(filtered, c)
+		}
+	}
+	return filtered
+}
+
+func compileRegex(s string) *regexp.Regexp {
+	if s == "" {
+		return nil
+	}
+	re, err := regexp.Compile(s)
+	if err != nil {
+		return nil
+	}
+	return re
+}
+
+func fetchServerDBs(conns []config.Connection, timeout int) []serverInfo {
+	// We'll use runner's fetchDBList function via the runner package
+	// Actually runner.fetchDBList is unexported. Let me add a public API.
+	// For now, implement inline.
+	
+	type fetchResult struct {
+		info serverInfo
+	}
+
+	ch := make(chan fetchResult, len(conns))
+	var wg sync.WaitGroup
+
+	for _, c := range conns {
+		wg.Add(1)
+		go func(conn config.Connection) {
+			defer wg.Done()
+			si := serverInfo{
+				Name: conn.Name,
+				Host: conn.Host,
+				Port: conn.Port,
+			}
+			// Use runner's public function or replicate
+			dbs, err := fetchDBListPublic(conn, timeout)
+			if err != nil {
+				si.Error = err.Error()
+			} else {
+				si.Databases = len(dbs)
+			}
+			ch <- fetchResult{info: si}
+		}(c)
+	}
+
+	go func() {
+		wg.Wait()
+		close(ch)
+	}()
+
+	var results []serverInfo
+	for r := range ch {
+		results = append(results, r.info)
+	}
+
+	sort.Slice(results, func(i, j int) bool {
+		return results[i].Name < results[j].Name
+	})
+
+	return results
+}
+
+// fetchDBListPublic is a copy of runner.fetchDBList exposed for the servers command.
+func fetchDBListPublic(conn config.Connection, timeout int) ([]string, error) {
+	dsn := conn.DSN("", timeout)
+	db, err := sql.Open("mysql", dsn)
+	if err != nil {
+		return nil, fmt.Errorf("connect: %w", err)
+	}
+	defer db.Close()
+
+	db.SetConnMaxLifetime(time.Duration(timeout) * time.Second)
+	db.SetMaxOpenConns(2)
+
+	ctx, cancel := context.WithTimeout(context.Background(), time.Duration(timeout)*time.Second)
+	defer cancel()
+
+	rows, err := db.QueryContext(ctx, "SHOW DATABASES")
+	if err != nil {
+		return nil, fmt.Errorf("query: %w", err)
+	}
+	defer rows.Close()
+
+	var dbs []string
+	systemDBs := map[string]bool{
+		"information_schema": true,
+		"mysql":              true,
+		"performance_schema": true,
+		"sys":                true,
+		"innodb":             true,
+	}
+
+	for rows.Next() {
+		var name string
+		if err := rows.Scan(&name); err != nil {
+			return nil, fmt.Errorf("scan: %w", err)
+		}
+		if !systemDBs[strings.ToLower(name)] {
+			dbs = append(dbs, name)
+		}
+	}
+	return dbs, rows.Err()
+}
+
+// ---------------------------------------------------------------------------
+// Main run logic
+// ---------------------------------------------------------------------------
 
 func run(ac *appConfig, cmd *cobra.Command) error {
 	// --version
@@ -135,8 +382,7 @@ func run(ac *appConfig, cmd *cobra.Command) error {
 		display.PrintInfo(fmt.Sprintf("Servers: %d\n", len(cfg.Connections)))
 	}
 
-	// 2. Merge config defaults with CLI overrides.
-	// CLI flag wins if explicitly set on command line; otherwise config value is used.
+	// 2. Merge config defaults with CLI overrides
 	mergeConfigWithCLI(ac, cmd, &cfg.Defaults)
 
 	// 3. Get SQL
@@ -261,9 +507,8 @@ func run(ac *appConfig, cmd *cobra.Command) error {
 }
 
 // mergeConfigWithCLI applies config defaults for any flag NOT explicitly
-// set on the command line.  Uses cobra's Changed() to detect explicit flags.
+// set on the command line.
 func mergeConfigWithCLI(ac *appConfig, cmd *cobra.Command, d *config.Defaults) {
-	// String flags: apply config value only if CLI flag is empty string
 	if !cmd.Flags().Changed("server") && d.ServerFilter != "" {
 		ac.server = d.ServerFilter
 	}
@@ -273,18 +518,12 @@ func mergeConfigWithCLI(ac *appConfig, cmd *cobra.Command, d *config.Defaults) {
 	if !cmd.Flags().Changed("exclude-db") && d.ExcludeDB != "" {
 		ac.excludeDB = d.ExcludeDB
 	}
-
-	// Int flags: apply config value only if CLI flag was not changed
 	if !cmd.Flags().Changed("timeout") {
 		ac.timeout = d.Timeout
 	}
 	if !cmd.Flags().Changed("concurrency") {
 		ac.concurrency = d.Concurrency
 	}
-
-	// Bool flags: apply config value only if CLI flag was not changed.
-	// Changed() returns true even if the user wrote --flag=false, which is
-	// the best we can do (user explicitly opted into that value).
 	if !cmd.Flags().Changed("force") && d.Force {
 		ac.force = true
 	}
