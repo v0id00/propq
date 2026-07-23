@@ -63,6 +63,7 @@ type appConfig struct {
 	noOutput    bool
 	noError     bool
 	noResult    bool
+	askCommit   bool
 }
 
 func newRootCmd() *cobra.Command {
@@ -117,6 +118,7 @@ SQL sources (in priority order):
 	flags.BoolVar(&ac.dryRun, "dry-run", false, "Show target databases without executing")
 	flags.BoolVarP(&ac.all, "all", "a", false, "Run on ALL databases (per-DB mode; default: once per server)")
 	flags.BoolVar(&ac.noTxn, "no-transaction", false, "Run in autocommit mode (no transaction)")
+	flags.BoolVar(&ac.askCommit, "ask-for-commit", false, "Show summary and ask before committing")
 
 	// Output
 	flags.BoolVar(&ac.json, "json", false, "Output as JSON (default: table)")
@@ -314,6 +316,15 @@ func compileRegex(s string) *regexp.Regexp {
 		return nil
 	}
 	return re
+}
+
+// matchString returns true if the regex matches the string.
+func matchString(pattern, s string) bool {
+	re := compileRegex(pattern)
+	if re == nil {
+		return true // no filter = match all
+	}
+	return re.MatchString(s)
 }
 
 func fetchServerDBs(conns []config.Connection, timeout int) []serverInfo {
@@ -589,7 +600,34 @@ func run(ac *appConfig, cmd *cobra.Command) error {
 		}
 	}
 
-	// 8. Execute
+	// 8. If --ask-for-commit: show targets, ask, then execute
+	if ac.askCommit {
+		var count int
+		var labels []string
+		if ac.all {
+			labels, count, err = runner.CountTargets(conns, filterCfg, ac.timeout)
+		} else {
+			for _, c := range conns {
+				if ac.server == "" || matchString(ac.server, c.Name) {
+					labels = append(labels, c.Name)
+				}
+			}
+			count = len(labels)
+			err = nil
+		}
+		if err != nil {
+			display.PrintError(err.Error())
+			return err
+		}
+		display.PrintDryRun(labels)
+		display.PrintDBTarget(count)
+		if !display.PromptYesNo("Commit changes to %d target(s)?", count) {
+			display.PrintCancelled()
+			return nil
+		}
+	}
+
+	// 9. Execute
 	if !ac.noProgress && !ac.stream {
 		fmt.Fprintln(os.Stderr)
 	}
