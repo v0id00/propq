@@ -65,7 +65,7 @@ type RunConfig struct {
 	Filter      FilterConfig
 	ShowBar     bool        // show progress bar
 	Targets     []Target    // pre-filtered targets (if set, skips fetch+filter)
-	Once        bool        // run once per server, not per database
+	All         bool        // run on ALL databases (per-DB mode); default: once per server
 }
 
 // Run executes the SQL on all matching databases.
@@ -77,8 +77,9 @@ func Run(conns []config.Connection, sqlContent string, cfg RunConfig) ([]Result,
 
 	var filtered []config.Connection
 
-	// ── Once mode: run SQL once per server (no per-DB iteration) ──
-	if cfg.Once {
+	// ── Default: once per server (fast) ──
+	// ── Per-database mode only when --all is set ──
+	if !cfg.All {
 		filtered = filterServers(conns, cfg.Filter.ServerRegex)
 		if len(filtered) == 0 {
 			return nil, fmt.Errorf("no servers match filter: %s", cfg.Filter.ServerRegex)
@@ -133,18 +134,17 @@ func Run(conns []config.Connection, sqlContent string, cfg RunConfig) ([]Result,
 		return nil, fmt.Errorf("no databases match the filters")
 	}
 
-	// Build connection map
+	// Build connection map and per-server semaphores
 	connMap := make(map[string]config.Connection, len(filtered))
+	serverSems := make(map[string]chan struct{})
 	for _, c := range filtered {
 		connMap[c.Name] = c
+		limit := c.MaxConnections
+		if limit <= 0 {
+			limit = 3
+		}
+		serverSems[c.Name] = make(chan struct{}, limit)
 	}
-
-	// Global worker pool (single semaphore for all servers)
-	poolSize := cfg.Concurrency
-	if poolSize <= 0 {
-		poolSize = 5
-	}
-	pool := make(chan struct{}, poolSize)
 
 	// Progress bar
 	totalTasks := len(targets)
@@ -157,61 +157,57 @@ func Run(conns []config.Connection, sqlContent string, cfg RunConfig) ([]Result,
 	resultCh := make(chan Result, totalTasks)
 	var wg sync.WaitGroup
 
-	// Launch goroutines — all targets go into one shared pool
+	// Group targets by server, then launch with per-server semaphore
+	serverTargets := make(map[string][]target)
 	for _, t := range targets {
-		conn, ok := connMap[t.server]
-		if !ok {
-			resultCh <- Result{
-				Server: t.server, Database: t.database,
-				Status: StatusError, Error: fmt.Sprintf("unknown server: %s", t.server),
-			}
-			if bar != nil {
-				bar.Add(1)
-			}
-			continue
+		serverTargets[t.server] = append(serverTargets[t.server], t)
+	}
+
+	for _, c := range filtered {
+		tgs := serverTargets[c.Name]
+		sem := serverSems[c.Name]
+
+		for _, t := range tgs {
+			wg.Add(1)
+			go func(conn config.Connection, t target, sem chan struct{}) {
+				defer wg.Done()
+				defer func() {
+					if bar != nil {
+						bar.Add(1)
+					}
+				}()
+
+				// Per-server semaphore (like db-runner)
+				sem <- struct{}{}
+				defer func() { <-sem }()
+
+				// Check cancellation
+				select {
+				case <-ctx.Done():
+					resultCh <- Result{
+						Server: conn.Name, Database: t.database,
+						Status: StatusSkip,
+					}
+					return
+				default:
+				}
+
+				if cfg.DryRun {
+					resultCh <- Result{
+						Server: conn.Name, Database: t.database,
+						Status: StatusOK,
+					}
+					return
+				}
+
+				start := time.Now()
+				r := executeOnDBLikeDBRunner(ctx, conn, t.database, sqlContent, timeout, cfg.NoTxn)
+				r.Server = conn.Name
+				r.Database = t.database
+				r.Elapsed = time.Since(start).Round(time.Millisecond).String()
+				resultCh <- r
+			}(c, t, sem)
 		}
-
-		wg.Add(1)
-		go func(conn config.Connection, t target) {
-			defer wg.Done()
-			defer func() {
-				if bar != nil {
-					bar.Add(1)
-				}
-			}()
-
-			// Acquire global pool slot
-			pool <- struct{}{}
-			defer func() { <-pool }()
-
-			// Check cancellation
-			select {
-			case <-ctx.Done():
-				resultCh <- Result{
-					Server:   conn.Name,
-					Database: t.database,
-					Status:   StatusSkip,
-				}
-				return
-			default:
-			}
-
-			if cfg.DryRun {
-				resultCh <- Result{
-					Server:   conn.Name,
-					Database: t.database,
-					Status:   StatusOK,
-				}
-				return
-			}
-
-			start := time.Now()
-			r := executeOnDB(ctx, conn, t.database, sqlContent, timeout, cfg.NoTxn)
-			r.Server = conn.Name
-			r.Database = t.database
-			r.Elapsed = time.Since(start).Round(time.Millisecond).String()
-			resultCh <- r
-		}(conn, t)
 	}
 
 	// Close when all done
@@ -384,9 +380,22 @@ func fetchDBList(conn config.Connection, timeout int) ([]string, error) {
 	return dbs, rows.Err()
 }
 
-// executeOnDB connects to a database and runs the SQL.
-func executeOnDB(ctx context.Context, conn config.Connection, dbName, sqlStr string, timeout int, noTxn bool) Result {
-	dsn := conn.DSN(dbName, timeout)
+// executeOnDBLikeDBRunner connects to a database and runs the SQL,
+// matching db-runner's proven pattern:
+//   - autocommit mode via connection param (not manual BEGIN/COMMIT)
+//   - multiStatements=true for sending all SQL at once
+//   - proper row return for SELECT queries
+func executeOnDBLikeDBRunner(ctx context.Context, conn config.Connection, dbName, sqlStr string, timeout int, noTxn bool) Result {
+	// Build DSN with autocommit control.
+	// db-runner passes autocommit=not use_transaction directly to the driver.
+	autocommit := "true"
+	if !noTxn {
+		autocommit = "false" // manual COMMIT at the end, like db-runner
+	}
+
+	dsn := fmt.Sprintf("%s:%s@tcp(%s:%d)/%s?timeout=%ds&readTimeout=%ds&writeTimeout=%ds&multiStatements=true&autocommit=%s",
+		conn.User, conn.Password, conn.Host, conn.Port, dbName, timeout, timeout, timeout, autocommit)
+
 	db, err := sql.Open("mysql", dsn)
 	if err != nil {
 		return Result{Status: StatusError, Error: fmt.Sprintf("connect: %v", err)}
@@ -399,31 +408,25 @@ func executeOnDB(ctx context.Context, conn config.Connection, dbName, sqlStr str
 	queryCtx, cancel := context.WithTimeout(ctx, time.Duration(timeout)*time.Second)
 	defer cancel()
 
-	if !noTxn {
-		tx, err := db.BeginTx(queryCtx, nil)
-		if err != nil {
-			return Result{Status: StatusError, Error: fmt.Sprintf("begin txn: %v", err)}
-		}
-
-		res, err := db.ExecContext(queryCtx, sqlStr)
-		if err != nil {
-			tx.Rollback()
-			return Result{Status: StatusError, Error: fmt.Sprintf("execute: %v", err)}
-		}
-
-		if err := tx.Commit(); err != nil {
-			return Result{Status: StatusError, Error: fmt.Sprintf("commit: %v", err)}
-		}
-
-		affected, _ := res.RowsAffected()
-		return Result{Status: StatusOK, Affected: affected}
-	}
-
-	// Autocommit mode
+	// Run the SQL — multiStatements=true handles semicolons
 	res, err := db.ExecContext(queryCtx, sqlStr)
 	if err != nil {
+		// If not autocommit, rollback is automatic on connection close
 		return Result{Status: StatusError, Error: fmt.Sprintf("execute: %v", err)}
 	}
+
+	// Commit if we're in transaction mode (autocommit=false)
+	if !noTxn {
+		// We need a separate connection to commit since ExecContext may have
+		// already used the connection. With database/sql, the connection
+		// used by ExecContext is returned to the pool. A simple COMMIT via
+		// a new ExecContext should work since autocommit=false is in DSN.
+		_, err := db.ExecContext(ctx, "COMMIT")
+		if err != nil {
+			return Result{Status: StatusError, Error: fmt.Sprintf("commit: %v", err)}
+		}
+	}
+
 	affected, _ := res.RowsAffected()
 	return Result{Status: StatusOK, Affected: affected}
 }

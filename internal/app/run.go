@@ -46,7 +46,7 @@ type appConfig struct {
 	dbfilter    string
 	excludeDB   string
 	selectMode  bool
-	once        bool
+	all         bool
 	timeout     int
 	concurrency int
 	force       bool
@@ -108,7 +108,7 @@ SQL sources (in priority order):
 	flags.IntVar(&ac.concurrency, "concurrency", 0, "Global concurrency limit (default: per-server max_connections)")
 	flags.BoolVar(&ac.force, "force", false, "Skip confirmation for destructive SQL")
 	flags.BoolVar(&ac.dryRun, "dry-run", false, "Show target databases without executing")
-	flags.BoolVarP(&ac.once, "once", "1", false, "Run once per server (not per database)")
+	flags.BoolVarP(&ac.all, "all", "a", false, "Run on ALL databases (per-DB mode; default: once per server)")
 	flags.BoolVar(&ac.noTxn, "no-transaction", false, "Run in autocommit mode (no transaction)")
 
 	// Output
@@ -486,15 +486,15 @@ func run(ac *appConfig, cmd *cobra.Command) error {
 			}
 			display.PrintDryRun(labels)
 			display.PrintTargetCount(len(labels))
-		} else if ac.once {
-			// Once mode: show servers only
+		} else if !ac.all {
+			// Per-server mode: show servers only
 			filtered := filterConnections(conns, ac.server)
 			var labels []string
 			for _, c := range filtered {
 				labels = append(labels, c.Name)
 			}
 			display.PrintDryRun(labels)
-			display.PrintInfo(fmt.Sprintf("  → %d server(s) targeted (--once mode)\n\n", len(labels)))
+			display.PrintInfo(fmt.Sprintf("  → %d server(s) targeted (default per-server mode)\n\n", len(labels)))
 		} else {
 			labels, count, err := runner.CountTargets(conns, filterCfg, ac.timeout)
 			if err != nil {
@@ -507,8 +507,8 @@ func run(ac *appConfig, cmd *cobra.Command) error {
 		return nil
 	}
 
-	// 7. If no DB filter (and not in select or once mode), warn and confirm
-	if !ac.selectMode && !ac.once && ac.dbfilter == "" && ac.excludeDB == "" {
+	// 7. If --all mode with no DB filter, warn and confirm
+	if !ac.selectMode && ac.all && ac.dbfilter == "" && ac.excludeDB == "" {
 		labels, count, err := runner.CountTargets(conns, filterCfg, ac.timeout)
 		if err != nil {
 			display.PrintError(err.Error())
@@ -550,7 +550,7 @@ func run(ac *appConfig, cmd *cobra.Command) error {
 		NoTxn:       ac.noTxn,
 		Filter:      filterCfg,
 		ShowBar:     !ac.noProgress,
-		Once:        ac.once,
+		All:        ac.all,
 	}
 	if ac.selectMode {
 		runCfg.Targets = selectedTargets
