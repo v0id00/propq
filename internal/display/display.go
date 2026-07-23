@@ -2,6 +2,7 @@
 package display
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -12,11 +13,15 @@ import (
 	"github.com/v0id00/propq/internal/runner"
 )
 
-// PrintTable renders results as a human-readable table.
+// PrintTable renders results as a human-readable table to stdout.
 func PrintTable(results []runner.Result) {
+	os.Stdout.WriteString(RenderTable(results))
+}
+
+// RenderTable returns results as a formatted table string.
+func RenderTable(results []runner.Result) string {
 	if len(results) == 0 {
-		color.Yellow("No results.")
-		return
+		return color.YellowString("No results.") + "\n"
 	}
 
 	// Count stats
@@ -31,6 +36,8 @@ func PrintTable(results []runner.Result) {
 		}
 	}
 
+	var buf bytes.Buffer
+
 	// Summary line
 	summaryColor := color.FgGreen
 	if errCount > 0 && okCount > 0 {
@@ -38,10 +45,10 @@ func PrintTable(results []runner.Result) {
 	} else if errCount > 0 {
 		summaryColor = color.FgRed
 	}
-	color.New(summaryColor, color.Bold).Fprintf(os.Stdout, "\nResults: %d OK  %d ERR  %d total\n\n", okCount, errCount, len(results))
+	buf.WriteString(color.New(summaryColor, color.Bold).Sprintf("\nResults: %d OK  %d ERR  %d total\n\n", okCount, errCount, len(results)))
 
 	// Table using tabwriter
-	w := tabwriter.NewWriter(os.Stdout, 0, 0, 3, ' ', 0)
+	w := tabwriter.NewWriter(&buf, 0, 0, 3, ' ', 0)
 
 	// Header
 	color.New(color.FgCyan, color.Bold).Fprintf(w, "Server\tDatabase\tStatus\tAffected\tElapsed\tError\n")
@@ -56,7 +63,6 @@ func PrintTable(results []runner.Result) {
 			}
 		}
 
-		// Color based on status
 		statusColor := color.FgGreen
 		if r.Status == runner.StatusError {
 			statusColor = color.FgRed
@@ -70,18 +76,11 @@ func PrintTable(results []runner.Result) {
 			errColored = color.RedString(errStr)
 		}
 
-		fmt.Fprintf(w, "%s	%s	%s	%d	%s	%s\n",
-			r.Server,
-			r.Database,
-			statusColored,
-			r.Affected,
-			r.Elapsed,
-			errColored,
-		)
+		fmt.Fprintf(w, "%s\t%s\t%s\t%d\t%s\t%s\n",
+			r.Server, r.Database, statusColored, r.Affected, r.Elapsed, errColored)
 
 		// Show result rows for SELECT queries
 		if r.Rows != nil && len(r.Rows.Rows) > 0 {
-			// Column headers (indented)
 			colLine := "  "
 			for i, col := range r.Rows.Columns {
 				if i > 0 {
@@ -101,7 +100,6 @@ func PrintTable(results []runner.Result) {
 			}
 			fmt.Fprintln(w)
 
-			// Data rows
 			for _, row := range r.Rows.Rows {
 				line := "  "
 				for i, val := range row {
@@ -121,14 +119,35 @@ func PrintTable(results []runner.Result) {
 	}
 
 	w.Flush()
+	return buf.String()
 }
 
 // PrintJSON outputs results as a JSON array.
 func PrintJSON(results []runner.Result) {
-	enc := json.NewEncoder(os.Stdout)
-	enc.SetIndent("", "  ")
-	if err := enc.Encode(results); err != nil {
-		color.Red("JSON encode error: %v", err)
+	os.Stdout.WriteString(RenderJSON(results))
+}
+
+// RenderJSON returns results as a JSON string.
+func RenderJSON(results []runner.Result) string {
+	b, err := json.MarshalIndent(results, "", "  ")
+	if err != nil {
+		return fmt.Sprintf(`{"error":"%s"}`, err)
+	}
+	return string(b) + "\n"
+}
+
+// PrintStreamResult prints a single result live (for --stream mode).
+func PrintStreamResult(r runner.Result) {
+	if r.Rows != nil && len(r.Rows.Rows) > 0 {
+		// Show as mini table
+		fmt.Fprintf(os.Stdout, "[%s.%s] %s (%d row(s)):\n", r.Server, r.Database, r.Elapsed, len(r.Rows.Rows))
+		for _, row := range r.Rows.Rows {
+			fmt.Fprintf(os.Stdout, "  %s\n", strings.Join(row, " │ "))
+		}
+	} else if r.Error != "" {
+		fmt.Fprintf(os.Stdout, "[%s.%s] ✗ %s (%s)\n", r.Server, r.Database, r.Error, r.Elapsed)
+	} else {
+		fmt.Fprintf(os.Stdout, "[%s.%s] ✓ affected=%d (%s)\n", r.Server, r.Database, r.Affected, r.Elapsed)
 	}
 }
 
@@ -165,6 +184,11 @@ func PrintInfo(msg string) {
 	color.Cyan("%s", msg)
 }
 
+// PrintStep prints a step message with emoji.
+func PrintStep(emoji, msg string) {
+	color.New(color.FgCyan).Fprintf(os.Stderr, "  %s %s\n", emoji, msg)
+}
+
 // PrintBanner prints the startup banner.
 func PrintBanner(version string) {
 	color.New(color.FgCyan, color.Bold).Fprintf(os.Stderr, "\n  propq %s\n", version)
@@ -197,9 +221,4 @@ func PrintTargetCount(count int) {
 // PrintSection prints a section header to stderr.
 func PrintSection(title string) {
 	color.New(color.FgCyan, color.Bold).Fprintf(os.Stderr, "\n── %s ──\n\n", title)
-}
-
-// PrintStep prints a step message.
-func PrintStep(emoji, msg string) {
-	color.New(color.FgCyan).Fprintf(os.Stderr, "  %s %s\n", emoji, msg)
 }

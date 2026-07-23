@@ -66,6 +66,8 @@ type RunConfig struct {
 	ShowBar     bool        // show progress bar
 	Targets     []Target    // pre-filtered targets (if set, skips fetch+filter)
 	All         bool        // run on ALL databases (per-DB mode); default: once per server
+	Stream      bool         // print results live as they complete
+	OnResult    func(Result) // optional callback for each result (streaming)
 }
 
 // Run executes the SQL on all matching databases.
@@ -220,6 +222,9 @@ func Run(conns []config.Connection, sqlContent string, cfg RunConfig) ([]Result,
 	var results []Result
 	for r := range resultCh {
 		results = append(results, r)
+		if cfg.OnResult != nil {
+			cfg.OnResult(r)
+		}
 	}
 
 	if bar != nil {
@@ -619,6 +624,9 @@ func runOncePerServer(conns []config.Connection, sqlContent string, cfg RunConfi
 	var results []Result
 	for r := range resultCh {
 		results = append(results, r)
+		if cfg.OnResult != nil {
+			cfg.OnResult(r)
+		}
 	}
 
 	if bar != nil {

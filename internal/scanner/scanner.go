@@ -30,7 +30,8 @@ type SQL struct {
 // Scan determines the SQL source and reads the content.
 // Priority: --sql > -f > -e > stdin (if piped)
 // editorOverride forces a specific editor binary (from config); empty means auto-detect.
-func Scan(sqlStr, filePath string, editMode bool, stdin io.Reader, editorOverride string) (*SQL, error) {
+// historyComment is prepended to the editor template (recent queries).
+func Scan(sqlStr, filePath string, editMode bool, stdin io.Reader, editorOverride, historyComment string) (*SQL, error) {
 	// 1. --sql flag
 	if sqlStr != "" {
 		return &SQL{Content: sqlStr, Source: SourceArg, Label: "arg"}, nil
@@ -54,9 +55,13 @@ func Scan(sqlStr, filePath string, editMode bool, stdin io.Reader, editorOverrid
 
 	// 3. -e / --edit
 	if editMode {
-		content, err := openEditor(editorOverride, ".sql", "-- Write your SQL here (semicolons for multiple statements)\n"+
-			"-- Save and quit (:wq) to execute\n"+
-			"-- To cancel: :q!\n\n")
+		template := "-- Write your SQL here (semicolons for multiple statements)\n" +
+			"-- Save and quit (:wq) to execute\n" +
+			"-- To cancel: :q!\n\n"
+		if historyComment != "" {
+			template = historyComment + "\n" + template
+		}
+		content, err := openEditor(editorOverride, ".sql", template)
 		if err != nil {
 			return nil, fmt.Errorf("editor: %w", err)
 		}

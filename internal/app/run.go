@@ -20,6 +20,7 @@ import (
 	"github.com/spf13/cobra"
 	"github.com/v0id00/propq/internal/config"
 	"github.com/v0id00/propq/internal/display"
+	"github.com/v0id00/propq/internal/history"
 	"github.com/v0id00/propq/internal/runner"
 	"github.com/v0id00/propq/internal/scanner"
 )
@@ -56,6 +57,9 @@ type appConfig struct {
 	noProgress  bool
 	noConfirm   bool
 	version     bool
+	outputFile  string
+	stream      bool
+	history     bool
 }
 
 func newRootCmd() *cobra.Command {
@@ -113,6 +117,8 @@ SQL sources (in priority order):
 
 	// Output
 	flags.BoolVar(&ac.json, "json", false, "Output as JSON (default: table)")
+	flags.StringVarP(&ac.outputFile, "output", "o", "", "Save output to file (in addition to stdout)")
+	flags.BoolVar(&ac.stream, "stream", false, "Print results live as they complete")
 	flags.BoolVarP(&ac.noProgress, "quiet", "q", false, "Suppress progress bar and banners")
 	flags.BoolVar(&ac.noConfirm, "no-confirm", false, "Skip confirmation prompt when no filter is set")
 
@@ -121,10 +127,48 @@ SQL sources (in priority order):
 
 	// Misc
 	flags.BoolVar(&ac.version, "version", false, "Show version")
+	flags.BoolVar(&ac.history, "history", false, "Show recent query history")
 
 	// Subcommands
 	cmd.AddCommand(newServersCmd())
+	cmd.AddCommand(newCompletionCmd())
 
+	return cmd
+}
+
+// ---------------------------------------------------------------------------
+// propq completion  —  generate shell completion scripts
+// ---------------------------------------------------------------------------
+
+func newCompletionCmd() *cobra.Command {
+	cmd := &cobra.Command{
+		Use:   "completion [bash|zsh|fish|powershell]",
+		Short: "Generate shell completion script",
+		Long: `Generate shell completion script for propq.
+
+To use:
+  propq completion bash > /etc/bash_completion.d/propq
+  propq completion zsh > /usr/local/share/zsh/site-functions/_propq
+  propq completion fish > ~/.config/fish/completions/propq.fish
+  propq completion powershell > propq.ps1
+
+Then restart your shell or reload completion.`,
+		Args: cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			switch args[0] {
+			case "bash":
+				return cmd.Root().GenBashCompletion(os.Stdout)
+			case "zsh":
+				return cmd.Root().GenZshCompletion(os.Stdout)
+			case "fish":
+				return cmd.Root().GenFishCompletion(os.Stdout, true)
+			case "powershell":
+				return cmd.Root().GenPowerShellCompletion(os.Stdout)
+			default:
+				return fmt.Errorf("unknown shell: %s (supported: bash, zsh, fish, powershell)", args[0])
+			}
+		},
+	}
 	return cmd
 }
 
@@ -367,6 +411,12 @@ func run(ac *appConfig, cmd *cobra.Command) error {
 		return nil
 	}
 
+	// --history: show recent queries
+	if ac.history {
+		fmt.Print(history.List(10))
+		return nil
+	}
+
 	// 1. Load config
 	cfgPath, err := config.FindConfigPath(ac.configPath)
 	if err != nil {
@@ -391,11 +441,13 @@ func run(ac *appConfig, cmd *cobra.Command) error {
 
 	// 3. Get SQL
 	editor := cfg.Defaults.Editor
-	sqlInput, err := scanner.Scan(ac.sql, ac.file, ac.edit, os.Stdin, editor)
+	historyComment := history.Recent(5)
+	sqlInput, err := scanner.Scan(ac.sql, ac.file, ac.edit, os.Stdin, editor, historyComment)
 	if err != nil {
 		display.PrintError(err.Error())
 		return err
 	}
+	history.Save(sqlInput.Content)
 
 	if !ac.noProgress {
 		display.PrintSection("SQL")
@@ -549,8 +601,12 @@ func run(ac *appConfig, cmd *cobra.Command) error {
 		Force:       ac.force,
 		NoTxn:       ac.noTxn,
 		Filter:      filterCfg,
-		ShowBar:     !ac.noProgress,
-		All:        ac.all,
+		ShowBar:     !ac.noProgress && !ac.stream,
+		All:         ac.all,
+		Stream:      ac.stream,
+	}
+	if ac.stream {
+		runCfg.OnResult = display.PrintStreamResult
 	}
 	if ac.selectMode {
 		runCfg.Targets = selectedTargets
@@ -567,10 +623,22 @@ func run(ac *appConfig, cmd *cobra.Command) error {
 	}
 
 	// 8. Output
-	if ac.json {
-		display.PrintJSON(results)
+	if ac.stream {
+		// Results were already printed live by the runner
+	} else if ac.json {
+		rendered := display.RenderJSON(results)
+		os.Stdout.WriteString(rendered)
+		if ac.outputFile != "" {
+			os.WriteFile(ac.outputFile, []byte(rendered), 0644)
+			display.PrintStep("📁", fmt.Sprintf("Output saved to %s", ac.outputFile))
+		}
 	} else {
-		display.PrintTable(results)
+		rendered := display.RenderTable(results)
+		os.Stdout.WriteString(rendered)
+		if ac.outputFile != "" {
+			os.WriteFile(ac.outputFile, []byte(rendered), 0644)
+			display.PrintStep("📁", fmt.Sprintf("Output saved to %s", ac.outputFile))
+		}
 	}
 
 	return nil
