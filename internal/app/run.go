@@ -45,6 +45,7 @@ type appConfig struct {
 	server      string
 	dbfilter    string
 	excludeDB   string
+	selectMode  bool
 	timeout     int
 	concurrency int
 	force       bool
@@ -99,6 +100,7 @@ SQL sources (in priority order):
 	flags.StringVarP(&ac.server, "server", "s", "", "Regex filter for server names")
 	flags.StringVarP(&ac.dbfilter, "dbfilter", "d", "", "Regex filter for database names")
 	flags.StringVarP(&ac.excludeDB, "exclude-db", "D", "", "Regex to exclude databases (inverse of -d)")
+	flags.BoolVarP(&ac.selectMode, "select", "S", false, "Open editor to pick databases interactively")
 
 	// Execution
 	flags.IntVar(&ac.timeout, "timeout", 0, "Query timeout in seconds (default: 30)")
@@ -428,21 +430,73 @@ func run(ac *appConfig, cmd *cobra.Command) error {
 		ExcludeDB:   ac.excludeDB,
 	}
 
-	// 5. Dry run
-	if ac.dryRun {
-		display.PrintSection("Dry Run")
+	// 5. If --select mode, open editor for interactive DB selection
+	var selectedTargets []runner.Target
+	if ac.selectMode {
 		labels, count, err := runner.CountTargets(conns, filterCfg, ac.timeout)
 		if err != nil {
 			display.PrintError(err.Error())
 			return err
 		}
-		display.PrintDryRun(labels)
-		display.PrintTargetCount(count)
+		if count == 0 {
+			display.PrintWarning("  No databases found.\n")
+			return nil
+		}
+
+		display.PrintSection("Select Databases")
+		display.PrintInfo(fmt.Sprintf("  %d database(s). Opening editor to pick...\n\n", count))
+
+		headerComment := "# Delete lines you do NOT want to target, then :wq\n" +
+			"# Format: server.database\n" +
+			"# To select all, just save: :wq\n\n"
+
+		selected, err := scanner.SelectFromEditor(labels, headerComment)
+		if err != nil {
+			display.PrintError(fmt.Sprintf("editor: %v", err))
+			return err
+		}
+
+		if len(selected) == 0 {
+			display.PrintWarning("  No databases selected.\n")
+			return nil
+		}
+
+		for _, s := range selected {
+			if parts := parseServerDB(s); parts != nil {
+				selectedTargets = append(selectedTargets, runner.Target{
+					Server: parts[0],
+					DB:     parts[1],
+				})
+			}
+		}
+
+		display.PrintInfo(fmt.Sprintf("  ✓ %d database(s) selected.\n\n", len(selectedTargets)))
+	}
+
+	// 6. Dry run
+	if ac.dryRun {
+		display.PrintSection("Dry Run")
+		if ac.selectMode {
+			var labels []string
+			for _, t := range selectedTargets {
+				labels = append(labels, fmt.Sprintf("%s.%s", t.Server, t.DB))
+			}
+			display.PrintDryRun(labels)
+			display.PrintTargetCount(len(labels))
+		} else {
+			labels, count, err := runner.CountTargets(conns, filterCfg, ac.timeout)
+			if err != nil {
+				display.PrintError(err.Error())
+				return err
+			}
+			display.PrintDryRun(labels)
+			display.PrintTargetCount(count)
+		}
 		return nil
 	}
 
-	// 6. If no DB filter, warn and confirm
-	if ac.dbfilter == "" && ac.excludeDB == "" {
+	// 7. If no DB filter (and not in select mode), warn and confirm
+	if !ac.selectMode && ac.dbfilter == "" && ac.excludeDB == "" {
 		labels, count, err := runner.CountTargets(conns, filterCfg, ac.timeout)
 		if err != nil {
 			display.PrintError(err.Error())
@@ -484,6 +538,9 @@ func run(ac *appConfig, cmd *cobra.Command) error {
 		NoTxn:       ac.noTxn,
 		Filter:      filterCfg,
 		ShowBar:     !ac.noProgress,
+	}
+	if ac.selectMode {
+		runCfg.Targets = selectedTargets
 	}
 
 	// Handle Ctrl+C gracefully
@@ -546,4 +603,14 @@ func truncate(s string, maxLen int) string {
 		return s
 	}
 	return s[:maxLen-3] + "..."
+}
+
+// parseServerDB splits a "server.database" label into [server, database].
+// Uses last dot as separator so server names containing dots still work.
+func parseServerDB(label string) []string {
+	dot := strings.LastIndex(label, ".")
+	if dot < 1 {
+		return nil
+	}
+	return []string{label[:dot], label[dot+1:]}
 }

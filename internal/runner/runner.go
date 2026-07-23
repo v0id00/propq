@@ -42,6 +42,12 @@ type Result struct {
 	Elapsed  string     `json:"elapsed"`
 }
 
+// Target represents a single (server, database) pair to execute on.
+type Target struct {
+	Server string
+	DB     string
+}
+
 // FilterConfig controls which servers and databases are targeted.
 type FilterConfig struct {
 	ServerRegex string
@@ -58,37 +64,58 @@ type RunConfig struct {
 	NoTxn       bool
 	Filter      FilterConfig
 	ShowBar     bool // show progress bar
+	Targets     []Target // pre-filtered targets (if set, skips fetch+filter)
 }
 
 // Run executes the SQL on all matching databases.
 func Run(conns []config.Connection, sqlContent string, cfg RunConfig) ([]Result, error) {
-	// 1. Filter servers
-	filtered := filterServers(conns, cfg.Filter.ServerRegex)
-	if len(filtered) == 0 {
-		return nil, fmt.Errorf("no servers match filter: %s", cfg.Filter.ServerRegex)
-	}
-
 	timeout := cfg.Timeout
 	if timeout <= 0 {
 		timeout = 30
 	}
 
-	// 2. Fetch databases from each server concurrently
-	serverDBs, err := fetchAllDatabases(filtered, timeout)
-	if err != nil {
-		return nil, fmt.Errorf("fetch databases: %w", err)
-	}
-
-	// 3. Build target list
+	// If pre-filtered targets provided, use them directly
 	var targets []target
-	for serverName, dbs := range serverDBs {
-		for _, db := range dbs {
-			targets = append(targets, target{server: serverName, database: db})
-		}
-	}
+	var filtered []config.Connection
 
-	// 4. Apply DB filters
-	targets = filterDatabases(targets, cfg.Filter.DBFilter, cfg.Filter.ExcludeDB)
+	if cfg.Targets != nil {
+		for _, t := range cfg.Targets {
+			targets = append(targets, target{server: t.Server, database: t.DB})
+		}
+		// Build filtered conn list from targets
+		connMap := make(map[string]config.Connection)
+		for _, c := range conns {
+			connMap[c.Name] = c
+		}
+		seen := make(map[string]bool)
+		for _, t := range targets {
+			if !seen[t.server] {
+				seen[t.server] = true
+				if c, ok := connMap[t.server]; ok {
+					filtered = append(filtered, c)
+				}
+			}
+		}
+	} else {
+		// Normal flow: filter servers, fetch DB lists, apply filters
+		filtered = filterServers(conns, cfg.Filter.ServerRegex)
+		if len(filtered) == 0 {
+			return nil, fmt.Errorf("no servers match filter: %s", cfg.Filter.ServerRegex)
+		}
+
+		serverDBs, err := fetchAllDatabases(filtered, timeout)
+		if err != nil {
+			return nil, fmt.Errorf("fetch databases: %w", err)
+		}
+
+		for serverName, dbs := range serverDBs {
+			for _, db := range dbs {
+				targets = append(targets, target{server: serverName, database: db})
+			}
+		}
+
+		targets = filterDatabases(targets, cfg.Filter.DBFilter, cfg.Filter.ExcludeDB)
+	}
 
 	if len(targets) == 0 {
 		return nil, fmt.Errorf("no databases match the filters")
