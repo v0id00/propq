@@ -51,7 +51,7 @@ jobs:
         run: go test ./... -v -count=1
 
       - name: Build
-        run: go build -ldflags="-X 'github.com/v0id00/propq/internal/app.version=$(git describe --tags --always --dirty 2>/dev/null || echo dev)'" -o build/propq github.com/v0id00/propq/cmd/propq/
+        run: go build -ldflags="-X 'github.com/v0id00/propq/internal/app.version=$(git describe --tags --always --dirty 2>/dev/null || echo dev)'" -o build/propq ./cmd/propq/
 
       - name: Binary check
         run: ./build/propq --version
@@ -112,7 +112,8 @@ jobs:
           go build \
             -ldflags="-X 'github.com/v0id00/propq/internal/app.version=${VERSION}'" \
             -o "dist/propq-${{ matrix.os.name }}${EXT}" \
-            github.com/v0id00/propq/cmd/propq/
+            ./cmd/propq/
+        working-directory: ${{ github.workspace }}
 
       - name: Checksum
         run: |
