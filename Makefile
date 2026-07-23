@@ -1,14 +1,22 @@
 BINARY=propq
 BUILD_DIR=build
 VERSION=$(shell git describe --tags --always --dirty 2>/dev/null || echo "dev")
+LDFLAGS=-ldflags="-X 'github.com/v0id00/propq/internal/app.version=$(VERSION)'"
 
-.PHONY: build clean install test lint run
+.PHONY: build clean install test lint run tidy
 
 build:
 	@mkdir -p $(BUILD_DIR)
-	go build -ldflags="-X 'github.com/v0id00/propq/internal/app.version=$(VERSION)'" \
-		-o $(BUILD_DIR)/$(BINARY) ./cmd/propq/
-	@echo "✓ Built $(BUILD_DIR)/$(BINARY)"
+	go build $(LDFLAGS) -o $(BUILD_DIR)/$(BINARY) ./cmd/propq/
+	@echo "✓ Built $(BUILD_DIR)/$(BINARY) ($(VERSION))"
+
+build-all:
+	@mkdir -p $(BUILD_DIR)
+	GOOS=linux GOARCH=amd64 go build $(LDFLAGS) -o $(BUILD_DIR)/$(BINARY)-linux-amd64 ./cmd/propq/
+	GOOS=linux GOARCH=arm64 go build $(LDFLAGS) -o $(BUILD_DIR)/$(BINARY)-linux-arm64 ./cmd/propq/
+	GOOS=darwin GOARCH=amd64 go build $(LDFLAGS) -o $(BUILD_DIR)/$(BINARY)-darwin-amd64 ./cmd/propq/
+	GOOS=darwin GOARCH=arm64 go build $(LDFLAGS) -o $(BUILD_DIR)/$(BINARY)-darwin-arm64 ./cmd/propq/
+	@echo "✓ Built all platforms ($(VERSION))"
 
 install:
 	go install -ldflags="-X 'github.com/v0id00/propq/internal/app.version=$(VERSION)'" \
