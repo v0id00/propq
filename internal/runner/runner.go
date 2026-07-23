@@ -380,21 +380,18 @@ func fetchDBList(conn config.Connection, timeout int) ([]string, error) {
 	return dbs, rows.Err()
 }
 
-// executeOnDBLikeDBRunner connects to a database and runs the SQL,
-// matching db-runner's proven pattern:
-//   - autocommit mode via connection param (not manual BEGIN/COMMIT)
-//   - multiStatements=true for sending all SQL at once
-//   - proper row return for SELECT queries
+// executeOnDBLikeDBRunner connects to a database and runs the SQL.
+// Returns rows for SELECT/SHOW/EXPLAIN/DESC queries.
 func executeOnDBLikeDBRunner(ctx context.Context, conn config.Connection, dbName, sqlStr string, timeout int, noTxn bool) Result {
-	// Build DSN with autocommit control.
-	// db-runner passes autocommit=not use_transaction directly to the driver.
 	autocommit := "true"
 	if !noTxn {
-		autocommit = "false" // manual COMMIT at the end, like db-runner
+		autocommit = "false"
 	}
 
 	dsn := fmt.Sprintf("%s:%s@tcp(%s:%d)/%s?timeout=%ds&readTimeout=%ds&writeTimeout=%ds&multiStatements=true&autocommit=%s",
 		conn.User, conn.Password, conn.Host, conn.Port, dbName, timeout, timeout, timeout, autocommit)
+	// Per-server mode (* means no database selected)
+	dsn = strings.Replace(dsn, "/"+"*"+"?", "/?", 1)
 
 	db, err := sql.Open("mysql", dsn)
 	if err != nil {
@@ -408,27 +405,90 @@ func executeOnDBLikeDBRunner(ctx context.Context, conn config.Connection, dbName
 	queryCtx, cancel := context.WithTimeout(ctx, time.Duration(timeout)*time.Second)
 	defer cancel()
 
-	// Run the SQL — multiStatements=true handles semicolons
+	// Detect SELECT-like queries and return rows
+	if isSelectQuery(sqlStr) {
+		rows, err := db.QueryContext(queryCtx, sqlStr)
+		if err != nil {
+			return Result{Status: StatusError, Error: fmt.Sprintf("query: %v", err)}
+		}
+		defer rows.Close()
+
+		columns, err := rows.Columns()
+		if err != nil {
+			return Result{Status: StatusError, Error: fmt.Sprintf("columns: %v", err)}
+		}
+
+		var data [][]string
+		for rows.Next() {
+			vals := make([]interface{}, len(columns))
+			valPtrs := make([]interface{}, len(columns))
+			for i := range vals {
+				valPtrs[i] = &vals[i]
+			}
+
+			if err := rows.Scan(valPtrs...); err != nil {
+				return Result{Status: StatusError, Error: fmt.Sprintf("scan: %v", err)}
+			}
+
+			row := make([]string, len(columns))
+			for i, v := range vals {
+				if v == nil {
+					row[i] = "NULL"
+				} else {
+					switch val := v.(type) {
+					case []byte:
+						row[i] = string(val)
+					default:
+						row[i] = fmt.Sprintf("%v", val)
+					}
+				}
+			}
+			data = append(data, row)
+		}
+		if err := rows.Err(); err != nil {
+			return Result{Status: StatusError, Error: fmt.Sprintf("rows: %v", err)}
+		}
+
+		rr := &RowResult{Columns: columns, Rows: data}
+		affected := int64(len(data))
+
+		// Commit if transaction mode
+		if !noTxn {
+			db.ExecContext(ctx, "COMMIT")
+		}
+
+		return Result{Status: StatusOK, Affected: affected, Rows: rr}
+	}
+
+	// Non-SELECT: use ExecContext
 	res, err := db.ExecContext(queryCtx, sqlStr)
 	if err != nil {
-		// If not autocommit, rollback is automatic on connection close
 		return Result{Status: StatusError, Error: fmt.Sprintf("execute: %v", err)}
 	}
 
-	// Commit if we're in transaction mode (autocommit=false)
 	if !noTxn {
-		// We need a separate connection to commit since ExecContext may have
-		// already used the connection. With database/sql, the connection
-		// used by ExecContext is returned to the pool. A simple COMMIT via
-		// a new ExecContext should work since autocommit=false is in DSN.
-		_, err := db.ExecContext(ctx, "COMMIT")
-		if err != nil {
-			return Result{Status: StatusError, Error: fmt.Sprintf("commit: %v", err)}
-		}
+		db.ExecContext(ctx, "COMMIT")
 	}
 
 	affected, _ := res.RowsAffected()
 	return Result{Status: StatusOK, Affected: affected}
+}
+
+// isSelectQuery returns true if the SQL is a SELECT-like query that returns rows.
+func isSelectQuery(sql string) bool {
+	trimmed := strings.TrimSpace(sql)
+	upper := strings.ToUpper(trimmed)
+	// Check common row-returning statements
+	for _, prefix := range []string{"SELECT", "SHOW", "EXPLAIN", "DESC", "DESCRIBE", "WITH"} {
+		if strings.HasPrefix(upper, prefix) {
+			return true
+		}
+	}
+	// Also check for UNION (e.g. SELECT ... UNION SELECT ...)
+	if strings.Contains(upper, " UNION ") && strings.Contains(upper, "SELECT") {
+		return true
+	}
+	return false
 }
 
 // CountTargets returns the list of databases that would be targeted, without executing.
@@ -528,41 +588,11 @@ func runOncePerServer(conns []config.Connection, sqlContent string, cfg RunConfi
 			}
 
 			start := time.Now()
-
-			// Connect without selecting a database
-			dsn := fmt.Sprintf("%s:%s@tcp(%s:%d)/?timeout=%ds&readTimeout=%ds&writeTimeout=%ds&multiStatements=true",
-				conn.User, conn.Password, conn.Host, conn.Port, timeout, timeout, timeout)
-
-			db, err := sql.Open("mysql", dsn)
-			if err != nil {
-				resultCh <- Result{
-					Server: conn.Name, Database: "*", Status: StatusError,
-					Error: fmt.Sprintf("connect: %v", err), Elapsed: time.Since(start).Round(time.Millisecond).String(),
-				}
-				return
-			}
-			db.SetConnMaxLifetime(time.Duration(timeout) * time.Second)
-			db.SetMaxOpenConns(1)
-
-			queryCtx, cancel2 := context.WithTimeout(ctx, time.Duration(timeout)*time.Second)
-			defer cancel2()
-
-			res, err := db.ExecContext(queryCtx, sqlContent)
-			if err != nil {
-				resultCh <- Result{
-					Server: conn.Name, Database: "*", Status: StatusError,
-					Error: fmt.Sprintf("execute: %v", err), Elapsed: time.Since(start).Round(time.Millisecond).String(),
-				}
-				db.Close()
-				return
-			}
-			db.Close()
-
-			affected, _ := res.RowsAffected()
-			resultCh <- Result{
-				Server: conn.Name, Database: "*", Status: StatusOK,
-				Affected: affected, Elapsed: time.Since(start).Round(time.Millisecond).String(),
-			}
+			r := executeOnDBLikeDBRunner(ctx, conn, "*", sqlContent, timeout, cfg.NoTxn)
+			r.Server = conn.Name
+			r.Database = "*"
+			r.Elapsed = time.Since(start).Round(time.Millisecond).String()
+			resultCh <- r
 		}(c)
 	}
 

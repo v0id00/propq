@@ -70,7 +70,7 @@ func PrintTable(results []runner.Result) {
 			errColored = color.RedString(errStr)
 		}
 
-		fmt.Fprintf(w, "%s\t%s\t%s\t%d\t%s\t%s\n",
+		fmt.Fprintf(w, "%s	%s	%s	%d	%s	%s\n",
 			r.Server,
 			r.Database,
 			statusColored,
@@ -78,6 +78,46 @@ func PrintTable(results []runner.Result) {
 			r.Elapsed,
 			errColored,
 		)
+
+		// Show result rows for SELECT queries
+		if r.Rows != nil && len(r.Rows.Rows) > 0 {
+			// Column headers (indented)
+			colLine := "  "
+			for i, col := range r.Rows.Columns {
+				if i > 0 {
+					colLine += " │ "
+				}
+				colLine += color.CyanString(col)
+			}
+			fmt.Fprintln(w, colLine)
+
+			// Separator
+			fmt.Fprint(w, "  ")
+			for i := range r.Rows.Columns {
+				if i > 0 {
+					fmt.Fprint(w, "─┼─")
+				}
+				fmt.Fprint(w, strings.Repeat("─", len(r.Rows.Columns[i])))
+			}
+			fmt.Fprintln(w)
+
+			// Data rows
+			for _, row := range r.Rows.Rows {
+				line := "  "
+				for i, val := range row {
+					if i > 0 {
+						line += " │ "
+					}
+					if val == "NULL" {
+						line += color.New(color.FgYellow, color.Italic).Sprint("NULL")
+					} else {
+						line += val
+					}
+				}
+				fmt.Fprintln(w, line)
+			}
+			fmt.Fprintf(w, "  (%d row(s))\n", len(r.Rows.Rows))
+		}
 	}
 
 	w.Flush()
