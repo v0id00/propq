@@ -50,10 +50,12 @@ type appConfig struct {
 	all         bool
 	timeout     int
 	concurrency int
+	retry       int
 	force       bool
 	dryRun      bool
 	noTxn       bool
 	json        bool
+	csv         bool
 	noProgress  bool
 	noConfirm   bool
 	version     bool
@@ -64,6 +66,7 @@ type appConfig struct {
 	noError     bool
 	noResult    bool
 	askCommit   bool
+	tags        string
 }
 
 func newRootCmd() *cobra.Command {
@@ -109,11 +112,13 @@ SQL sources (in priority order):
 	flags.StringVarP(&ac.server, "server", "s", "", "Regex filter for server names")
 	flags.StringVarP(&ac.dbfilter, "dbfilter", "d", "", "Regex filter for database names")
 	flags.StringVarP(&ac.excludeDB, "exclude-db", "D", "", "Regex to exclude databases (inverse of -d)")
+	flags.StringVarP(&ac.tags, "tags", "t", "", "Filter by tags (comma-separated, OR)")
 	flags.BoolVarP(&ac.selectMode, "select", "S", false, "Open editor to pick databases interactively")
 
 	// Execution
 	flags.IntVar(&ac.timeout, "timeout", 0, "Query timeout in seconds (default: 30)")
 	flags.IntVar(&ac.concurrency, "concurrency", 0, "Global concurrency limit (default: per-server max_connections)")
+	flags.IntVar(&ac.retry, "retry", 0, "Retry failed databases N times with exponential backoff")
 	flags.BoolVar(&ac.force, "force", false, "Skip confirmation for destructive SQL")
 	flags.BoolVar(&ac.dryRun, "dry-run", false, "Show target databases without executing")
 	flags.BoolVarP(&ac.all, "all", "a", false, "Run on ALL databases (per-DB mode; default: once per server)")
@@ -122,6 +127,7 @@ SQL sources (in priority order):
 
 	// Output
 	flags.BoolVar(&ac.json, "json", false, "Output as JSON (default: table)")
+	flags.BoolVar(&ac.csv, "csv", false, "Output as CSV")
 	flags.StringVarP(&ac.outputFile, "output", "o", "", "Save output to file (in addition to stdout)")
 	flags.BoolVar(&ac.stream, "stream", false, "Print results live as they complete")
 	flags.BoolVarP(&ac.noOutput, "no-output", "N", false, "Suppress result output, show only summary")
@@ -141,8 +147,86 @@ SQL sources (in priority order):
 	cmd.AddCommand(newServersCmd())
 	cmd.AddCommand(newCompletionCmd())
 	cmd.AddCommand(newSkillCmd())
+	cmd.AddCommand(newConfigCmd())
 
 	return cmd
+}
+
+// ---------------------------------------------------------------------------
+// propq config check  —  validate configuration and test server connectivity
+// ---------------------------------------------------------------------------
+
+func newConfigCmd() *cobra.Command {
+	var cfgPath string
+
+	cmd := &cobra.Command{
+		Use:   "config",
+		Short: "Validate configuration and test server connections",
+	}
+
+	checkCmd := &cobra.Command{
+		Use:   "check",
+		Short: "Validate config and test all server connections",
+		Long: `Validate the propq configuration file and test connectivity
+to all configured servers.
+
+Exits with 0 if all servers are reachable, 1 otherwise.`,
+		RunE: func(cmd *cobra.Command, args []string) error {
+			return runConfigCheck(cfgPath)
+		},
+	}
+	checkCmd.Flags().StringVarP(&cfgPath, "config", "c", "", "Path to config file")
+
+	cmd.AddCommand(checkCmd)
+	return cmd
+}
+
+func runConfigCheck(cfgPath string) error {
+	path, err := config.FindConfigPath(cfgPath)
+	if err != nil {
+		display.PrintError(fmt.Sprintf("config: %v", err))
+		return err
+	}
+
+	cfg, err := config.Load(path)
+	if err != nil {
+		display.PrintError(fmt.Sprintf("config parse: %v", err))
+		return err
+	}
+
+	fmt.Fprintf(os.Stderr, "Config: %s\n", path)
+	fmt.Fprintf(os.Stderr, "Servers: %d\n\n", len(cfg.Connections))
+
+	ok := 0
+	fail := 0
+	for name, conn := range cfg.Connections {
+		dsn := conn.DSN("", 5)
+		db, err := sql.Open("mysql", dsn)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "  ✗ %-15s  %s\n", name, err)
+			fail++
+			continue
+		}
+
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		err = db.PingContext(ctx)
+		cancel()
+		db.Close()
+
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "  ✗ %-15s  %s\n", name, err)
+			fail++
+		} else {
+			fmt.Fprintf(os.Stderr, "  ✓ %-15s  %s:%d\n", name, conn.Host, conn.Port)
+			ok++
+		}
+	}
+
+	fmt.Fprintf(os.Stderr, "\n%d OK, %d FAIL of %d servers\n", ok, fail, len(cfg.Connections))
+	if fail > 0 {
+		return fmt.Errorf("%d server(s) unreachable", fail)
+	}
+	return nil
 }
 
 // ---------------------------------------------------------------------------
@@ -192,6 +276,7 @@ func newServersCmd() *cobra.Command {
 		jsonOut bool
 		timeout int
 		quiet   bool
+		tagsF   string
 	)
 
 	cmd := &cobra.Command{
@@ -207,13 +292,14 @@ Examples:
   propq servers -s "www1|www7"
   propq servers --json`,
 		RunE: func(cmd *cobra.Command, args []string) error {
-			return runServers(cfgPath, server, jsonOut, timeout, quiet)
+			return runServers(cfgPath, server, jsonOut, timeout, quiet, tagsF)
 		},
 	}
 
 	fl := cmd.Flags()
 	fl.StringVarP(&cfgPath, "config", "c", "", "Path to config file")
 	fl.StringVarP(&server, "server", "s", "", "Regex filter for server names")
+	fl.StringVar(&tagsF, "tags", "", "Filter by tags (comma-separated)")
 	fl.BoolVar(&jsonOut, "json", false, "JSON output")
 	fl.IntVar(&timeout, "timeout", 10, "Connection timeout in seconds")
 	fl.BoolVarP(&quiet, "quiet", "q", false, "Suppress banner")
@@ -229,7 +315,7 @@ type serverInfo struct {
 	Error      string `json:"error,omitempty"`
 }
 
-func runServers(cfgPath, serverRegex string, jsonOut bool, timeout int, quiet bool) error {
+func runServers(cfgPath, serverRegex string, jsonOut bool, timeout int, quiet bool, tags string) error {
 	resolved, err := config.FindConfigPath(cfgPath)
 	if err != nil {
 		display.PrintError(err.Error())
@@ -258,6 +344,27 @@ func runServers(cfgPath, serverRegex string, jsonOut bool, timeout int, quiet bo
 		if len(conns) == 0 {
 			display.PrintError(fmt.Sprintf("no servers match: %s", serverRegex))
 			return fmt.Errorf("no servers match: %s", serverRegex)
+		}
+	}
+
+	// Filter by tags
+	tagList := splitTags(tags)
+	if len(tagList) > 0 {
+		var tagged []config.Connection
+		for _, c := range conns {
+			for _, ct := range c.Tags {
+				for _, ft := range tagList {
+					if ct == ft {
+						tagged = append(tagged, c)
+						break
+					}
+				}
+			}
+		}
+		conns = tagged
+		if len(conns) == 0 {
+			display.PrintError(fmt.Sprintf("no servers match tags: %s", tags))
+			return fmt.Errorf("no servers match tags: %s", tags)
 		}
 	}
 
@@ -316,6 +423,21 @@ func compileRegex(s string) *regexp.Regexp {
 		return nil
 	}
 	return re
+}
+
+// splitTags splits a comma-separated tag string into a slice.
+func splitTags(s string) []string {
+	if s == "" {
+		return nil
+	}
+	var tags []string
+	for _, t := range strings.Split(s, ",") {
+		t = strings.TrimSpace(t)
+		if t != "" {
+			tags = append(tags, t)
+		}
+	}
+	return tags
 }
 
 // matchString returns true if the regex matches the string.
@@ -503,6 +625,7 @@ func run(ac *appConfig, cmd *cobra.Command) error {
 		ServerRegex: ac.server,
 		DBFilter:    ac.dbfilter,
 		ExcludeDB:   ac.excludeDB,
+		Tags:        splitTags(ac.tags),
 	}
 
 	// 5. If --select mode, open editor for interactive DB selection
@@ -640,6 +763,7 @@ func run(ac *appConfig, cmd *cobra.Command) error {
 		ShowBar:     !ac.noProgress && !ac.stream,
 		All:         ac.all,
 		Stream:      ac.stream,
+		Retry:       ac.retry,
 		AskCommit:   ac.askCommit,
 		SQLText:     sqlInput.Content,
 	}
@@ -672,27 +796,21 @@ func run(ac *appConfig, cmd *cobra.Command) error {
 		return err
 	}
 
-	// 8. Output
-	if ac.stream {
-		// Results were already printed live
-		if ac.noOutput {
-			display.PrintDone(countOK(results), countERR(results))
-		}
-	} else if ac.noOutput {
-		// Only show summary
+	// 10. Output
+	if ac.stream && ac.noOutput {
 		display.PrintDone(countOK(results), countERR(results))
-	} else if ac.json {
-		// Filter results for no-error / no-result
-		out := filterResults(results, ac.noError, ac.noResult)
-		rendered := display.RenderJSON(out)
-		os.Stdout.WriteString(rendered)
-		if ac.outputFile != "" {
-			os.WriteFile(ac.outputFile, []byte(rendered), 0644)
-			display.PrintSaved(ac.outputFile)
-		}
+	} else if ac.noOutput {
+		display.PrintDone(countOK(results), countERR(results))
 	} else {
 		out := filterResults(results, ac.noError, ac.noResult)
-		rendered := display.RenderTable(out)
+		var rendered string
+		if ac.json {
+			rendered = display.RenderJSON(out)
+		} else if ac.csv {
+			rendered = display.RenderCSV(out)
+		} else {
+			rendered = display.RenderTable(out)
+		}
 		os.Stdout.WriteString(rendered)
 		if ac.outputFile != "" {
 			os.WriteFile(ac.outputFile, []byte(rendered), 0644)

@@ -26,7 +26,7 @@ func TestFilterServers(t *testing.T) {
 	}
 
 	for _, tt := range tests {
-		got := filterServers(conns, tt.regex)
+		got := filterServers(conns, tt.regex, nil)
 		if len(got) != tt.want {
 			t.Errorf("filterServers(%q) = %d, want %d", tt.regex, len(got), tt.want)
 		}

@@ -249,8 +249,38 @@ func PrintStreamResult(r runner.Result) {
 func PrintJSON(results []runner.Result) {
 	os.Stdout.WriteString(RenderJSON(results))
 }
-
+// RenderJSON returns results as a JSON string.
 func RenderJSON(results []runner.Result) string {
 	b, _ := json.MarshalIndent(results, "", "  ")
 	return string(b) + "\n"
+}
+
+// RenderCSV returns results as a CSV string.
+func RenderCSV(results []runner.Result) string {
+	var buf bytes.Buffer
+	for _, r := range results {
+		if r.Rows != nil && len(r.Rows.Rows) > 0 {
+			// Header row once
+			if buf.Len() == 0 {
+				buf.WriteString(strings.Join(r.Rows.Columns, ","))
+				buf.WriteString("\n")
+			}
+			for _, row := range r.Rows.Rows {
+				escaped := make([]string, len(row))
+				for i, v := range row {
+					if strings.ContainsAny(v, ",\"\n") {
+						v = `"` + strings.ReplaceAll(v, `"`, `""`) + `"`
+					}
+					escaped[i] = v
+				}
+				buf.WriteString(strings.Join(escaped, ","))
+				buf.WriteString("\n")
+			}
+		} else if r.Status == runner.StatusOK {
+			buf.WriteString(fmt.Sprintf("# %s.%s: OK affected=%d\n", r.Server, r.Database, r.Affected))
+		} else if r.Status == runner.StatusError {
+			buf.WriteString(fmt.Sprintf("# %s.%s: ERR %s\n", r.Server, r.Database, r.Error))
+		}
+	}
+	return buf.String()
 }

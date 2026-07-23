@@ -53,6 +53,7 @@ type FilterConfig struct {
 	ServerRegex string
 	DBFilter    string
 	ExcludeDB   string
+	Tags        []string
 }
 
 // RunConfig holds execution parameters.
@@ -70,6 +71,7 @@ type RunConfig struct {
 	OnResult    func(Result) // optional callback for each result (streaming)
 	AskCommit   bool        // per-target confirmation before executing
 	SQLText     string      // SQL text shown in ask-commit prompt
+	Retry       int         // retry failed databases N times
 }
 
 // Run executes the SQL on all matching databases.
@@ -84,7 +86,7 @@ func Run(conns []config.Connection, sqlContent string, cfg RunConfig) ([]Result,
 	// ── Default: once per server (fast) ──
 	// ── Per-database mode only when --all is set ──
 	if !cfg.All {
-		filtered = filterServers(conns, cfg.Filter.ServerRegex)
+		filtered = filterServers(conns, cfg.Filter.ServerRegex, cfg.Filter.Tags)
 		if len(filtered) == 0 {
 			return nil, fmt.Errorf("no servers match filter: %s", cfg.Filter.ServerRegex)
 		}
@@ -115,7 +117,7 @@ func Run(conns []config.Connection, sqlContent string, cfg RunConfig) ([]Result,
 		}
 	} else {
 		// Normal flow: filter servers, fetch DB lists, apply filters
-		filtered = filterServers(conns, cfg.Filter.ServerRegex)
+		filtered = filterServers(conns, cfg.Filter.ServerRegex, cfg.Filter.Tags)
 		if len(filtered) == 0 {
 			return nil, fmt.Errorf("no servers match filter: %s", cfg.Filter.ServerRegex)
 		}
@@ -210,7 +212,7 @@ func Run(conns []config.Connection, sqlContent string, cfg RunConfig) ([]Result,
 				}
 
 				start := time.Now()
-				r := executeOnDBLikeDBRunner(ctx, conn, t.database, sqlContent, timeout, cfg.NoTxn)
+				r := executeOnDBLikeDBRunner(ctx, conn, t.database, sqlContent, timeout, cfg.Retry, cfg.NoTxn)
 				r.Server = conn.Name
 				r.Database = t.database
 				r.Elapsed = time.Since(start).Round(time.Millisecond).String()
@@ -248,22 +250,39 @@ type target struct {
 	database string
 }
 
-// filterServers filters connections by server name regex.
-func filterServers(conns []config.Connection, serverRegex string) []config.Connection {
-	if serverRegex == "" {
-		return conns
-	}
-	re, err := regexp.Compile(serverRegex)
-	if err != nil {
-		return conns
-	}
+// filterServers filters connections by server name regex and tags.
+func filterServers(conns []config.Connection, serverRegex string, tags []string) []config.Connection {
 	var filtered []config.Connection
 	for _, c := range conns {
-		if re.MatchString(c.Name) {
-			filtered = append(filtered, c)
+		if serverRegex != "" {
+			re, err := regexp.Compile(serverRegex)
+			if err != nil {
+				continue
+			}
+			if !re.MatchString(c.Name) {
+				continue
+			}
 		}
+		if len(tags) > 0 {
+			if !hasAnyTag(c.Tags, tags) {
+				continue
+			}
+		}
+		filtered = append(filtered, c)
 	}
 	return filtered
+}
+
+// hasAnyTag returns true if connection tags contain any of the given tags.
+func hasAnyTag(connTags, filterTags []string) bool {
+	for _, ft := range filterTags {
+		for _, ct := range connTags {
+			if ct == ft {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 // filterDatabases filters targets by dbFilter and excludeDB regex.
@@ -394,77 +413,101 @@ func fetchDBList(conn config.Connection, timeout int) ([]string, error) {
 
 // executeOnDBLikeDBRunner connects to a database and runs the SQL.
 // Returns rows for SELECT/SHOW/EXPLAIN/DESC queries.
-func executeOnDBLikeDBRunner(ctx context.Context, conn config.Connection, dbName, sqlStr string, timeout int, noTxn bool) Result {
+// Retries cfg.Retry times with exponential backoff on failure.
+func executeOnDBLikeDBRunner(ctx context.Context, conn config.Connection, dbName, sqlStr string, timeout int, retry int, noTxn bool) Result {
 	autocommit := "true"
 	if !noTxn {
 		autocommit = "false"
 	}
 
-	dsn := fmt.Sprintf("%s:%s@tcp(%s:%d)/%s?timeout=%ds&readTimeout=%ds&writeTimeout=%ds&multiStatements=true&autocommit=%s",
-		conn.User, conn.Password, conn.Host, conn.Port, dbName, timeout, timeout, timeout, autocommit)
-	// Per-server mode (* means no database selected)
-	dsn = strings.Replace(dsn, "/"+"*"+"?", "/?", 1)
-
-	db, err := sql.Open("mysql", dsn)
-	if err != nil {
-		return Result{Status: StatusError, Error: fmt.Sprintf("connect: %v", err)}
+	maxAttempts := retry + 1
+	if maxAttempts < 1 {
+		maxAttempts = 1
 	}
-	defer db.Close()
 
-	db.SetConnMaxLifetime(time.Duration(timeout) * time.Second)
-	db.SetMaxOpenConns(1)
+	var lastErr error
+	for attempt := 0; attempt < maxAttempts; attempt++ {
+		if attempt > 0 {
+			// Exponential backoff: 0.5s, 1s, 2s, 4s...
+			backoff := time.Duration(500<<uint(attempt-1)) * time.Millisecond
+			time.Sleep(backoff)
+		}
 
-	queryCtx, cancel := context.WithTimeout(ctx, time.Duration(timeout)*time.Second)
-	defer cancel()
+		dsn := fmt.Sprintf("%s:%s@tcp(%s:%d)/%s?timeout=%ds&readTimeout=%ds&writeTimeout=%ds&multiStatements=true&autocommit=%s",
+			conn.User, conn.Password, conn.Host, conn.Port, dbName, timeout, timeout, timeout, autocommit)
+		// Per-server mode (* means no database selected)
+		dsn = strings.Replace(dsn, "/"+"*"+"?", "/?", 1)
 
-	// Detect SELECT-like queries and return rows
-	if isSelectQuery(sqlStr) {
-		rows, err := db.QueryContext(queryCtx, sqlStr)
+		db, err := sql.Open("mysql", dsn)
 		if err != nil {
-			return Result{Status: StatusError, Error: fmt.Sprintf("query: %v", err)}
+			lastErr = err
+			continue
 		}
 
-		// Read first result set
-		columns, err := rows.Columns()
+		db.SetConnMaxLifetime(time.Duration(timeout) * time.Second)
+		db.SetMaxOpenConns(1)
+
+		queryCtx, cancel2 := context.WithTimeout(ctx, time.Duration(timeout)*time.Second)
+
+		if isSelectQuery(sqlStr) {
+			rows, err := db.QueryContext(queryCtx, sqlStr)
+			if err != nil {
+				cancel2()
+				lastErr = err
+				db.Close()
+				continue
+			}
+
+			columns, err := rows.Columns()
+			if err != nil {
+				rows.Close()
+				cancel2()
+				db.Close()
+				lastErr = err
+				continue
+			}
+
+			data := readRows(rows)
+			rows.Close()
+			for rows.NextResultSet() {
+				rows.Close()
+			}
+			if err := rows.Err(); err != nil {
+				cancel2()
+				db.Close()
+				lastErr = err
+				continue
+			}
+
+			if !noTxn {
+				db.ExecContext(ctx, "COMMIT")
+			}
+			cancel2()
+			db.Close()
+
+			rr := &RowResult{Columns: columns, Rows: data}
+			return Result{Status: StatusOK, Affected: int64(len(data)), Rows: rr}
+		}
+
+		// Non-SELECT
+		res, err := db.ExecContext(queryCtx, sqlStr)
+		cancel2()
 		if err != nil {
-			rows.Close()
-			return Result{Status: StatusError, Error: fmt.Sprintf("columns: %v", err)}
+			lastErr = err
+			db.Close()
+			continue
 		}
-
-		data := readRows(rows)
-		rows.Close()
-
-		// Consume any remaining result sets (multiStatements)
-		for rows.NextResultSet() {
-			rows.Close()
-		}
-
-		if err := rows.Err(); err != nil {
-			return Result{Status: StatusError, Error: fmt.Sprintf("rows: %v", err)}
-		}
-
-		rr := &RowResult{Columns: columns, Rows: data}
-		affected := int64(len(data))
 
 		if !noTxn {
 			db.ExecContext(ctx, "COMMIT")
 		}
+		db.Close()
 
-		return Result{Status: StatusOK, Affected: affected, Rows: rr}
+		affected, _ := res.RowsAffected()
+		return Result{Status: StatusOK, Affected: affected}
 	}
 
-	// Non-SELECT: use ExecContext
-	res, err := db.ExecContext(queryCtx, sqlStr)
-	if err != nil {
-		return Result{Status: StatusError, Error: fmt.Sprintf("execute: %v", err)}
-	}
-
-	if !noTxn {
-		db.ExecContext(ctx, "COMMIT")
-	}
-
-	affected, _ := res.RowsAffected()
-	return Result{Status: StatusOK, Affected: affected}
+	return Result{Status: StatusError, Error: fmt.Sprintf("execute (after %d retries): %v", retry, lastErr)}
 }
 
 // readRows reads all rows from a result set into [][]string.
@@ -520,7 +563,7 @@ func isSelectQuery(sql string) bool {
 
 // CountTargets returns the list of databases that would be targeted, without executing.
 func CountTargets(conns []config.Connection, filter FilterConfig, timeout int) ([]string, int, error) {
-	filtered := filterServers(conns, filter.ServerRegex)
+	filtered := filterServers(conns, filter.ServerRegex, filter.Tags)
 	if len(filtered) == 0 {
 		return nil, 0, fmt.Errorf("no servers match filter")
 	}
@@ -554,7 +597,8 @@ func runSequentialWithPrompt(targets []target, conns []config.Connection, sqlCon
 	}
 
 	var results []Result
-	for _, t := range targets {
+	total := len(targets)
+	for idx, t := range targets {
 		conn, ok := connMap[t.server]
 		if !ok {
 			results = append(results, Result{
@@ -564,13 +608,13 @@ func runSequentialWithPrompt(targets []target, conns []config.Connection, sqlCon
 			continue
 		}
 
-		// Show SQL and ask
+		// Show progress + target
 		label := fmt.Sprintf("%s.%s", t.server, t.database)
 		sqlPreview := strings.ReplaceAll(strings.TrimSpace(sqlContent), "\n", " ")
 		if len(sqlPreview) > 60 {
 			sqlPreview = sqlPreview[:57] + "..."
 		}
-		fmt.Fprintf(os.Stderr, "\n  ◇  %s\n     %s\n", label, sqlPreview)
+		fmt.Fprintf(os.Stderr, "\n  [%d/%d]  ◇  %s\n     %s\n", idx+1, total, label, sqlPreview)
 
 		if !promptYesNo("Execute on this database?") {
 			results = append(results, Result{
@@ -582,7 +626,7 @@ func runSequentialWithPrompt(targets []target, conns []config.Connection, sqlCon
 
 		// Execute with transaction (autocommit=false + manual commit)
 		start := time.Now()
-		r := executeOnDBLikeDBRunner(context.Background(), conn, t.database, sqlContent, timeout, false)
+		r := executeOnDBLikeDBRunner(context.Background(), conn, t.database, sqlContent, timeout, cfg.Retry, false)
 		r.Server = conn.Name
 		r.Database = t.database
 		r.Elapsed = time.Since(start).Round(time.Millisecond).String()
@@ -685,7 +729,7 @@ func runOncePerServer(conns []config.Connection, sqlContent string, cfg RunConfi
 			}
 
 			start := time.Now()
-			r := executeOnDBLikeDBRunner(ctx, conn, "*", sqlContent, timeout, cfg.NoTxn)
+			r := executeOnDBLikeDBRunner(ctx, conn, "*", sqlContent, timeout, cfg.Retry, cfg.NoTxn)
 			r.Server = conn.Name
 			r.Database = "*"
 			r.Elapsed = time.Since(start).Round(time.Millisecond).String()
