@@ -51,8 +51,7 @@ jobs:
         run: go test ./... -v -count=1
 
       - name: Build
-        run: go build -o ../build/propq .
-        working-directory: ${{ github.workspace }}/cmd/propq
+        run: go build -ldflags="-X 'github.com/v0id00/propq/internal/app.version=$(git describe --tags --always --dirty 2>/dev/null || echo dev)'" -o build/propq ./cmd/propq/
 
       - name: Binary check
         run: ./build/propq --version
@@ -104,7 +103,7 @@ jobs:
 
       - name: Build (${{ matrix.os.name }})
         run: |
-          mkdir -p ../dist
+          mkdir -p dist
           export GOOS=${{ matrix.os.goos }}
           export GOARCH=${{ matrix.os.goarch }}
           export VERSION=$(git describe --tags --always 2>/dev/null || echo dev)
@@ -112,9 +111,8 @@ jobs:
           [ "$GOOS" = "windows" ] && EXT=".exe"
           go build \
             -ldflags="-X 'github.com/v0id00/propq/internal/app.version=${VERSION}'" \
-            -o "../dist/propq-${{ matrix.os.name }}${EXT}" \
-            .
-        working-directory: ${{ github.workspace }}/cmd/propq
+            -o "dist/propq-${{ matrix.os.name }}${EXT}" \
+            ./cmd/propq/
 
       - name: Checksum
         run: |
