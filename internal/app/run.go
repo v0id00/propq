@@ -132,6 +132,7 @@ SQL sources (in priority order):
 	// Subcommands
 	cmd.AddCommand(newServersCmd())
 	cmd.AddCommand(newCompletionCmd())
+	cmd.AddCommand(newSkillCmd())
 
 	return cmd
 }
