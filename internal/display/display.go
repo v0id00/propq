@@ -13,18 +13,112 @@ import (
 	"github.com/v0id00/propq/internal/runner"
 )
 
-// PrintTable renders results as a human-readable table to stdout.
+// ──   Styles   ──────────────────────────────────────────────
+
+var (
+	styleOK    = color.New(color.FgGreen, color.Bold).SprintFunc()
+	styleErr   = color.New(color.FgRed, color.Bold).SprintFunc()
+	styleInfo  = color.New(color.FgCyan).SprintFunc()
+	styleDim   = color.New(color.FgHiBlack).SprintFunc()
+	styleHead  = color.New(color.FgCyan, color.Bold).SprintFunc()
+	styleNull  = color.New(color.FgYellow, color.Italic).SprintFunc()
+	styleTitle = color.New(color.FgWhite, color.Bold).SprintFunc()
+)
+
+// ──   Banner   ──────────────────────────────────────────────
+
+func PrintBanner(version string) {
+	fmt.Fprintf(os.Stderr, "propq %s  ·  MySQL/MariaDB async SQL executor\n", version)
+}
+
+func PrintConfigInfo(path string, count int) {
+	fmt.Fprintf(os.Stderr, "  %s  %s  ·  %s %d\n",
+		styleInfo("cfg"), styleDim(path), styleInfo("srv"), count)
+}
+
+func PrintSQLInfo(label string) {
+	fmt.Fprintf(os.Stderr, "  %s  %s\n", styleInfo("sql"), label)
+}
+
+func PrintServerCount(n int) {
+	fmt.Fprintf(os.Stderr, "  %s  %d server(s)\n", styleInfo("→"), n)
+}
+
+func PrintDBTarget(count int) {
+	fmt.Fprintf(os.Stderr, "  %s  %d database(s)\n", styleInfo("→"), count)
+}
+
+func PrintDone(ok, err int) {
+	if err > 0 {
+		fmt.Fprintf(os.Stderr, "  %s  %d OK  %s %d ERR\n", styleInfo("■"), ok, styleErr("✗"), err)
+	} else {
+		fmt.Fprintf(os.Stderr, "  %s  %d OK\n", styleOK("✓"), ok)
+	}
+}
+
+func PrintCancelled() {
+	fmt.Fprintf(os.Stderr, "  %s\n", styleErr("✗ Cancelled"))
+}
+
+func PrintSaved(path string) {
+	fmt.Fprintf(os.Stderr, "  %s  %s\n", styleInfo("📁"), path)
+}
+
+func PrintInfo(msg string) {
+	fmt.Fprintf(os.Stderr, "  %s\n", msg)
+}
+
+func PrintWarning(msg string) {
+	fmt.Fprintf(os.Stderr, "  %s  %s\n", styleErr("⚠"), msg)
+}
+
+func PrintError(msg string) {
+	fmt.Fprintf(os.Stderr, "  %s  %s\n", styleErr("✗"), msg)
+}
+
+func PrintDestructiveWarning() {
+	fmt.Fprintf(os.Stderr, "\n  %s  Destructive SQL detected! Use --force to execute.\n\n", styleErr("⚠"))
+}
+
+func PrintDryRun(labels []string) {
+	if len(labels) == 0 {
+		PrintInfo("No targets.")
+		return
+	}
+	fmt.Fprintf(os.Stderr, "  %s  %d target(s):\n", styleInfo("◇"), len(labels))
+	w := tabwriter.NewWriter(os.Stderr, 0, 0, 2, ' ', 0)
+	for _, l := range labels {
+		fmt.Fprintf(w, "    %s\n", l)
+	}
+	w.Flush()
+}
+
+func PrintNoDBFilterWarning() {
+	fmt.Fprintf(os.Stderr, "  %s  No database filter set — targeting ALL databases\n", styleErr("⚠"))
+}
+
+// ──   Prompt   ──────────────────────────────────────────────
+
+func PromptYesNo(format string, args ...any) bool {
+	msg := fmt.Sprintf(format, args...)
+	fmt.Fprintf(os.Stderr, "%s [y/N] ", msg)
+	var resp string
+	fmt.Scanln(&resp)
+	resp = strings.TrimSpace(strings.ToLower(resp))
+	return resp == "y" || resp == "yes"
+}
+
+// ──   Table output   ────────────────────────────────────────
+
 func PrintTable(results []runner.Result) {
 	os.Stdout.WriteString(RenderTable(results))
 }
 
-// RenderTable returns results as a formatted table string.
 func RenderTable(results []runner.Result) string {
 	if len(results) == 0 {
-		return color.YellowString("No results.") + "\n"
+		return ""
 	}
 
-	// Count stats
 	okCount := 0
 	errCount := 0
 	for _, r := range results {
@@ -38,187 +132,125 @@ func RenderTable(results []runner.Result) string {
 
 	var buf bytes.Buffer
 
-	// Summary line
-	summaryColor := color.FgGreen
-	if errCount > 0 && okCount > 0 {
-		summaryColor = color.FgYellow
-	} else if errCount > 0 {
-		summaryColor = color.FgRed
-	}
-	buf.WriteString(color.New(summaryColor, color.Bold).Sprintf("\nResults: %d OK  %d ERR  %d total\n\n", okCount, errCount, len(results)))
-
-	// Table using tabwriter
-	w := tabwriter.NewWriter(&buf, 0, 0, 3, ' ', 0)
-
-	// Header
-	color.New(color.FgCyan, color.Bold).Fprintf(w, "Server\tDatabase\tStatus\tAffected\tElapsed\tError\n")
-	fmt.Fprintf(w, "------\t--------\t------\t--------\t-------\t-----\n")
-
+	// Per-server result blocks
 	for _, r := range results {
-		statusStr := string(r.Status)
-		errStr := r.Error
-		if errStr != "" {
-			if len(errStr) > 80 {
-				errStr = errStr[:77] + "..."
+		label := fmt.Sprintf("%s.%s", r.Server, r.Database)
+		if r.Status == runner.StatusOK {
+			if r.Rows != nil && len(r.Rows.Rows) > 0 {
+				buf.WriteString(renderRows(label, r.Rows))
+			} else if r.Affected > 0 {
+				buf.WriteString(fmt.Sprintf("  %s  %s  %s affected=%d\n",
+					styleOK("✓"), label, styleDim(timeStr(r.Elapsed)), r.Affected))
+			} else {
+				buf.WriteString(fmt.Sprintf("  %s  %s  %s\n",
+					styleOK("✓"), label, styleDim(timeStr(r.Elapsed))))
+			}
+		} else if r.Status == runner.StatusError {
+			buf.WriteString(fmt.Sprintf("  %s  %s  %s\n",
+				styleErr("✗"), label, styleDim(r.Error)))
+		}
+	}
+
+	// Summary footer
+	if okCount > 0 || errCount > 0 {
+		buf.WriteString(fmt.Sprintf("\n  %s", styleDim(fmt.Sprintf("%d OK", okCount))))
+		if errCount > 0 {
+			buf.WriteString(fmt.Sprintf("  %s", styleErr(fmt.Sprintf("%d ERR", errCount))))
+		}
+		buf.WriteString(fmt.Sprintf("  %s\n", styleDim(fmt.Sprintf("(%d total)", len(results)))))
+	}
+
+	return buf.String()
+}
+
+func renderRows(label string, rr *runner.RowResult) string {
+	var buf bytes.Buffer
+	buf.WriteString(fmt.Sprintf("  %s  %s  %s (%d row(s))\n",
+		styleOK("✓"), label, styleDim(timeStr("")), len(rr.Rows)))
+
+	// Column headers
+	buf.WriteString("    ")
+	for i, col := range rr.Columns {
+		if i > 0 {
+			buf.WriteString(" │ ")
+		}
+		buf.WriteString(styleHead(col))
+	}
+	buf.WriteString("\n")
+
+	// Data rows
+	for _, row := range rr.Rows {
+		buf.WriteString("    ")
+		for i, val := range row {
+			if i > 0 {
+				buf.WriteString(" │ ")
+			}
+			if val == "NULL" {
+				buf.WriteString(styleNull("NULL"))
+			} else {
+				buf.WriteString(val)
 			}
 		}
+		buf.WriteString("\n")
+	}
 
-		statusColor := color.FgGreen
-		if r.Status == runner.StatusError {
-			statusColor = color.FgRed
-		} else if r.Status == runner.StatusSkip {
-			statusColor = color.FgYellow
-		}
+	return buf.String()
+}
 
-		statusColored := color.New(statusColor, color.Bold).Sprint(statusStr)
-		errColored := ""
-		if errStr != "" {
-			errColored = color.RedString(errStr)
-		}
+func timeStr(t string) string {
+	if t == "" {
+		return ""
+	}
+	return t
+}
 
-		fmt.Fprintf(w, "%s\t%s\t%s\t%d\t%s\t%s\n",
-			r.Server, r.Database, statusColored, r.Affected, r.Elapsed, errColored)
+// ──   Stream output   ───────────────────────────────────────
 
-		// Show result rows for SELECT queries
+func PrintStreamResult(r runner.Result) {
+	label := fmt.Sprintf("%s.%s", r.Server, r.Database)
+
+	if r.Status == runner.StatusOK {
 		if r.Rows != nil && len(r.Rows.Rows) > 0 {
-			colLine := "  "
+			// Print column headers first time, then rows
+			headerLine := ""
 			for i, col := range r.Rows.Columns {
 				if i > 0 {
-					colLine += " │ "
+					headerLine += " │ "
 				}
-				colLine += color.CyanString(col)
+				headerLine += styleHead(col)
 			}
-			fmt.Fprintln(w, colLine)
-
-			// Separator
-			fmt.Fprint(w, "  ")
-			for i := range r.Rows.Columns {
-				if i > 0 {
-					fmt.Fprint(w, "─┼─")
-				}
-				fmt.Fprint(w, strings.Repeat("─", len(r.Rows.Columns[i])))
-			}
-			fmt.Fprintln(w)
-
+			fmt.Fprintf(os.Stdout, "%s  %s\n", label, styleDim(fmt.Sprintf("(%d row(s))", len(r.Rows.Rows))))
 			for _, row := range r.Rows.Rows {
-				line := "  "
+				line := ""
 				for i, val := range row {
 					if i > 0 {
 						line += " │ "
 					}
 					if val == "NULL" {
-						line += color.New(color.FgYellow, color.Italic).Sprint("NULL")
+						line += styleNull("NULL")
 					} else {
 						line += val
 					}
 				}
-				fmt.Fprintln(w, line)
+				fmt.Fprintf(os.Stdout, "  %s\n", line)
 			}
-			fmt.Fprintf(w, "  (%d row(s))\n", len(r.Rows.Rows))
+		} else if r.Affected > 0 {
+			fmt.Fprintf(os.Stdout, "%s  %s  affected=%d\n", styleOK("✓"), label, r.Affected)
+		} else {
+			fmt.Fprintf(os.Stdout, "%s  %s\n", styleOK("✓"), label)
 		}
+	} else if r.Status == runner.StatusError {
+		fmt.Fprintf(os.Stdout, "%s  %s  %s\n", styleErr("✗"), label, r.Error)
 	}
-
-	w.Flush()
-	return buf.String()
 }
 
-// PrintJSON outputs results as a JSON array.
+// ──   JSON output   ─────────────────────────────────────────
+
 func PrintJSON(results []runner.Result) {
 	os.Stdout.WriteString(RenderJSON(results))
 }
 
-// RenderJSON returns results as a JSON string.
 func RenderJSON(results []runner.Result) string {
-	b, err := json.MarshalIndent(results, "", "  ")
-	if err != nil {
-		return fmt.Sprintf(`{"error":"%s"}`, err)
-	}
+	b, _ := json.MarshalIndent(results, "", "  ")
 	return string(b) + "\n"
-}
-
-// PrintStreamResult prints a single result live (for --stream mode).
-func PrintStreamResult(r runner.Result) {
-	if r.Rows != nil && len(r.Rows.Rows) > 0 {
-		// Show as mini table
-		fmt.Fprintf(os.Stdout, "[%s.%s] %s (%d row(s)):\n", r.Server, r.Database, r.Elapsed, len(r.Rows.Rows))
-		for _, row := range r.Rows.Rows {
-			fmt.Fprintf(os.Stdout, "  %s\n", strings.Join(row, " │ "))
-		}
-	} else if r.Error != "" {
-		fmt.Fprintf(os.Stdout, "[%s.%s] ✗ %s (%s)\n", r.Server, r.Database, r.Error, r.Elapsed)
-	} else {
-		fmt.Fprintf(os.Stdout, "[%s.%s] ✓ affected=%d (%s)\n", r.Server, r.Database, r.Affected, r.Elapsed)
-	}
-}
-
-// PrintDryRun shows the list of databases that would be targeted.
-func PrintDryRun(labels []string) {
-	if len(labels) == 0 {
-		color.Yellow("No databases targeted.")
-		return
-	}
-
-	color.Cyan("\nDry Run — %d database(s) would be affected:\n\n", len(labels))
-
-	w := tabwriter.NewWriter(os.Stdout, 0, 0, 3, ' ', 0)
-	color.New(color.FgCyan, color.Bold).Fprintf(w, "#\tTarget\n")
-	fmt.Fprintf(w, "-\t------\n")
-	for i, label := range labels {
-		fmt.Fprintf(w, "%d\t%s\n", i+1, label)
-	}
-	w.Flush()
-}
-
-// PrintError prints a fatal error message.
-func PrintError(msg string) {
-	color.Red("Error: %s", msg)
-}
-
-// PrintWarning prints a warning message.
-func PrintWarning(msg string) {
-	color.Yellow("Warning: %s", msg)
-}
-
-// PrintInfo prints an informational message.
-func PrintInfo(msg string) {
-	color.Cyan("%s", msg)
-}
-
-// PrintStep prints a step message with emoji.
-func PrintStep(emoji, msg string) {
-	color.New(color.FgCyan).Fprintf(os.Stderr, "  %s %s\n", emoji, msg)
-}
-
-// PrintBanner prints the startup banner.
-func PrintBanner(version string) {
-	color.New(color.FgCyan, color.Bold).Fprintf(os.Stderr, "\n  propq %s\n", version)
-	color.New(color.FgCyan).Fprintf(os.Stderr, "  MySQL/MariaDB async SQL executor\n\n")
-}
-
-// PrintDestructiveWarning prints a warning about destructive SQL.
-func PrintDestructiveWarning() {
-	color.New(color.FgRed, color.Bold).Fprintln(os.Stderr, "\n  ⚠ Destructive SQL detected!")
-	color.New(color.FgRed).Fprintln(os.Stderr, "  This query contains DROP, TRUNCATE, DELETE, or ALTER TABLE statements.")
-	color.New(color.FgRed).Fprintln(os.Stderr, "  Use --force to execute.")
-}
-
-// PromptYesNo asks the user a yes/no question and returns true for yes.
-func PromptYesNo(format string, args ...any) bool {
-	msg := fmt.Sprintf(format, args...)
-	color.New(color.FgYellow, color.Bold).Fprint(os.Stderr, msg+" [y/N] ")
-
-	var response string
-	fmt.Scanln(&response)
-	response = strings.TrimSpace(strings.ToLower(response))
-	return response == "y" || response == "yes"
-}
-
-// PrintTargetCount prints how many databases will be targeted.
-func PrintTargetCount(count int) {
-	color.Cyan("  → %d database(s) targeted\n\n", count)
-}
-
-// PrintSection prints a section header to stderr.
-func PrintSection(title string) {
-	color.New(color.FgCyan, color.Bold).Fprintf(os.Stderr, "\n── %s ──\n\n", title)
 }

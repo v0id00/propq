@@ -433,8 +433,7 @@ func run(ac *appConfig, cmd *cobra.Command) error {
 
 	if !ac.noProgress {
 		display.PrintBanner(version)
-		display.PrintInfo(fmt.Sprintf("Config: %s\n", cfgPath))
-		display.PrintInfo(fmt.Sprintf("Servers: %d\n", len(cfg.Connections)))
+		display.PrintConfigInfo(cfgPath, len(cfg.Connections))
 	}
 
 	// 2. Merge config defaults with CLI overrides
@@ -456,17 +455,15 @@ func run(ac *appConfig, cmd *cobra.Command) error {
 	history.Save(sqlInput.Content)
 
 	if !ac.noProgress {
-		display.PrintSection("SQL")
-		switch sqlInput.Source {
-		case scanner.SourceArg:
-			display.PrintInfo(fmt.Sprintf("  Inline: %s\n", truncate(sqlInput.Content, 80)))
-		case scanner.SourceFile:
-			display.PrintInfo(fmt.Sprintf("  File: %s\n", sqlInput.Label))
-		case scanner.SourcePipe:
-			display.PrintInfo("  From stdin (piped)\n")
-		case scanner.SourceEditor:
-			display.PrintInfo(fmt.Sprintf("  From editor (%d lines)\n", len(sqlInput.Content)))
+		sqlLabel := fmt.Sprintf("inline: %s", truncate(sqlInput.Content, 60))
+		if sqlInput.Source == scanner.SourceFile {
+			sqlLabel = fmt.Sprintf("file: %s", sqlInput.Label)
+		} else if sqlInput.Source == scanner.SourcePipe {
+			sqlLabel = "stdin (piped)"
+		} else if sqlInput.Source == scanner.SourceEditor {
+			sqlLabel = fmt.Sprintf("editor (%d lines)", len(sqlInput.Content))
 		}
+		display.PrintSQLInfo(sqlLabel)
 	}
 
 	// 4. Check destructive SQL
@@ -476,7 +473,7 @@ func run(ac *appConfig, cmd *cobra.Command) error {
 			return fmt.Errorf("destructive SQL requires --force")
 		}
 		if !ac.noProgress {
-			display.PrintWarning("  Destructive SQL — --force is active\n")
+			display.PrintWarning("Destructive SQL — --force active")
 		}
 	}
 
@@ -500,12 +497,11 @@ func run(ac *appConfig, cmd *cobra.Command) error {
 			return err
 		}
 		if count == 0 {
-			display.PrintWarning("  No databases found.\n")
+			display.PrintWarning("No databases found.")
 			return nil
 		}
 
-		display.PrintSection("Select Databases")
-		display.PrintInfo(fmt.Sprintf("  %d database(s). Opening editor to pick...\n\n", count))
+		display.PrintInfo(fmt.Sprintf("Opening editor to pick from %d database(s)...", count))
 
 		headerComment := "# Delete lines you do NOT want to target, then :wq\n" +
 			"# Format: server.database\n" +
@@ -518,7 +514,7 @@ func run(ac *appConfig, cmd *cobra.Command) error {
 		}
 
 		if len(selected) == 0 {
-			display.PrintWarning("  No databases selected.\n")
+			display.PrintWarning("No databases selected.")
 			return nil
 		}
 
@@ -531,28 +527,24 @@ func run(ac *appConfig, cmd *cobra.Command) error {
 			}
 		}
 
-		display.PrintInfo(fmt.Sprintf("  ✓ %d database(s) selected.\n\n", len(selectedTargets)))
+		display.PrintDBTarget(len(selectedTargets))
 	}
 
 	// 6. Dry run
 	if ac.dryRun {
-		display.PrintSection("Dry Run")
 		if ac.selectMode {
 			var labels []string
 			for _, t := range selectedTargets {
 				labels = append(labels, fmt.Sprintf("%s.%s", t.Server, t.DB))
 			}
 			display.PrintDryRun(labels)
-			display.PrintTargetCount(len(labels))
 		} else if !ac.all {
-			// Per-server mode: show servers only
 			filtered := filterConnections(conns, ac.server)
 			var labels []string
 			for _, c := range filtered {
 				labels = append(labels, c.Name)
 			}
 			display.PrintDryRun(labels)
-			display.PrintInfo(fmt.Sprintf("  → %d server(s) targeted (default per-server mode)\n\n", len(labels)))
 		} else {
 			labels, count, err := runner.CountTargets(conns, filterCfg, ac.timeout)
 			if err != nil {
@@ -560,44 +552,40 @@ func run(ac *appConfig, cmd *cobra.Command) error {
 				return err
 			}
 			display.PrintDryRun(labels)
-			display.PrintTargetCount(count)
+			display.PrintDBTarget(count)
 		}
 		return nil
 	}
 
 	// 7. If --all mode with no DB filter, warn and confirm
 	if !ac.selectMode && ac.all && ac.dbfilter == "" && ac.excludeDB == "" {
-		labels, count, err := runner.CountTargets(conns, filterCfg, ac.timeout)
+		_, count, err := runner.CountTargets(conns, filterCfg, ac.timeout)
 		if err != nil {
 			display.PrintError(err.Error())
 			return err
 		}
 
 		if count > 0 {
-			display.PrintSection("Targets")
-			if count <= 20 {
-				display.PrintDryRun(labels)
-			} else {
-				display.PrintInfo(fmt.Sprintf("  %d databases will be targeted\n", count))
-			}
+			display.PrintNoDBFilterWarning()
+			display.PrintDBTarget(count)
 
 			if cfg.Defaults.ConfirmWithoutFilter && !ac.noConfirm {
-				if !display.PromptYesNo("\n  Run on all %d database(s)?", count) {
-					display.PrintInfo("  Cancelled.\n")
+				if !display.PromptYesNo("Run on all %d database(s)?", count) {
+					display.PrintCancelled()
 					return nil
 				}
 			} else if !ac.noProgress {
-				display.PrintInfo("  Running (confirmation skipped by config or --no-confirm)\n")
+				display.PrintInfo("Running (confirmation skipped)")
 			}
 		} else {
-			display.PrintWarning("  No databases found.\n")
+			display.PrintWarning("No databases found.")
 			return nil
 		}
 	}
 
-	// 7. Execute
-	if !ac.noProgress {
-		display.PrintSection("Execute")
+	// 8. Execute
+	if !ac.noProgress && !ac.stream {
+		fmt.Fprintln(os.Stderr)
 	}
 
 	runCfg := runner.RunConfig{
@@ -636,14 +624,14 @@ func run(ac *appConfig, cmd *cobra.Command) error {
 		os.Stdout.WriteString(rendered)
 		if ac.outputFile != "" {
 			os.WriteFile(ac.outputFile, []byte(rendered), 0644)
-			display.PrintStep("📁", fmt.Sprintf("Output saved to %s", ac.outputFile))
+			display.PrintSaved(ac.outputFile)
 		}
 	} else {
 		rendered := display.RenderTable(results)
 		os.Stdout.WriteString(rendered)
 		if ac.outputFile != "" {
 			os.WriteFile(ac.outputFile, []byte(rendered), 0644)
-			display.PrintStep("📁", fmt.Sprintf("Output saved to %s", ac.outputFile))
+			display.PrintSaved(ac.outputFile)
 		}
 	}
 
