@@ -440,6 +440,11 @@ func run(ac *appConfig, cmd *cobra.Command) error {
 	// 2. Merge config defaults with CLI overrides
 	mergeConfigWithCLI(ac, cmd, &cfg.Defaults)
 
+	// -d or -D implies --all (per-database mode)
+	if (ac.dbfilter != "" || ac.excludeDB != "") && !cmd.Flags().Changed("all") {
+		ac.all = true
+	}
+
 	// 3. Get SQL
 	editor := cfg.Defaults.Editor
 	historyComment := history.Recent(5)
