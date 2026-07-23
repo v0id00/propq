@@ -51,7 +51,7 @@ func (d *Defaults) SetDefaults() {
 		d.Timeout = 30
 	}
 	if d.Concurrency <= 0 {
-		d.Concurrency = 10
+		d.Concurrency = 5
 	}
 }
 

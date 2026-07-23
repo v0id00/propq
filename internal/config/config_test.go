@@ -79,8 +79,8 @@ password = ""
 	if cfg.Defaults.Timeout != 30 {
 		t.Errorf("expected default timeout 30, got %d", cfg.Defaults.Timeout)
 	}
-	if cfg.Defaults.Concurrency != 10 {
-		t.Errorf("expected default concurrency 10, got %d", cfg.Defaults.Concurrency)
+	if cfg.Defaults.Concurrency != 5 {
+		t.Errorf("expected default concurrency 5, got %d", cfg.Defaults.Concurrency)
 	}
 
 	conn := cfg.Connections["test"]

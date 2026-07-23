@@ -133,30 +133,18 @@ func Run(conns []config.Connection, sqlContent string, cfg RunConfig) ([]Result,
 		return nil, fmt.Errorf("no databases match the filters")
 	}
 
-	// 5. Build connection map
+	// Build connection map
 	connMap := make(map[string]config.Connection, len(filtered))
 	for _, c := range filtered {
 		connMap[c.Name] = c
 	}
 
-	// Group targets by server
-	serverTargets := make(map[string][]target)
-	for _, t := range targets {
-		serverTargets[t.server] = append(serverTargets[t.server], t)
+	// Global worker pool (single semaphore for all servers)
+	poolSize := cfg.Concurrency
+	if poolSize <= 0 {
+		poolSize = 5
 	}
-
-	// Build per-server semaphores
-	type semSlot struct {
-		ch chan struct{}
-	}
-	serverSems := make(map[string]*semSlot, len(filtered))
-	for _, c := range filtered {
-		maxConn := c.MaxConnections
-		if cfg.Concurrency > 0 && cfg.Concurrency < maxConn {
-			maxConn = cfg.Concurrency
-		}
-		serverSems[c.Name] = &semSlot{ch: make(chan struct{}, maxConn)}
-	}
+	pool := make(chan struct{}, poolSize)
 
 	// Progress bar
 	totalTasks := len(targets)
@@ -169,54 +157,61 @@ func Run(conns []config.Connection, sqlContent string, cfg RunConfig) ([]Result,
 	resultCh := make(chan Result, totalTasks)
 	var wg sync.WaitGroup
 
-	// Launch goroutines
-	for _, c := range filtered {
-		tgs := serverTargets[c.Name]
-		slot := serverSems[c.Name]
-
-		for _, t := range tgs {
-			wg.Add(1)
-			go func(conn config.Connection, t target) {
-				defer wg.Done()
-				defer func() {
-					if bar != nil {
-						bar.Add(1)
-					}
-				}()
-
-				// Acquire semaphore
-				slot.ch <- struct{}{}
-				defer func() { <-slot.ch }()
-
-				// Check cancellation
-				select {
-				case <-ctx.Done():
-					resultCh <- Result{
-						Server:   conn.Name,
-						Database: t.database,
-						Status:   StatusSkip,
-					}
-					return
-				default:
-				}
-
-				if cfg.DryRun {
-					resultCh <- Result{
-						Server:   conn.Name,
-						Database: t.database,
-						Status:   StatusOK,
-					}
-					return
-				}
-
-				start := time.Now()
-				r := executeOnDB(ctx, conn, t.database, sqlContent, timeout, cfg.NoTxn)
-				r.Server = conn.Name
-				r.Database = t.database
-				r.Elapsed = time.Since(start).Round(time.Millisecond).String()
-				resultCh <- r
-			}(c, t)
+	// Launch goroutines — all targets go into one shared pool
+	for _, t := range targets {
+		conn, ok := connMap[t.server]
+		if !ok {
+			resultCh <- Result{
+				Server: t.server, Database: t.database,
+				Status: StatusError, Error: fmt.Sprintf("unknown server: %s", t.server),
+			}
+			if bar != nil {
+				bar.Add(1)
+			}
+			continue
 		}
+
+		wg.Add(1)
+		go func(conn config.Connection, t target) {
+			defer wg.Done()
+			defer func() {
+				if bar != nil {
+					bar.Add(1)
+				}
+			}()
+
+			// Acquire global pool slot
+			pool <- struct{}{}
+			defer func() { <-pool }()
+
+			// Check cancellation
+			select {
+			case <-ctx.Done():
+				resultCh <- Result{
+					Server:   conn.Name,
+					Database: t.database,
+					Status:   StatusSkip,
+				}
+				return
+			default:
+			}
+
+			if cfg.DryRun {
+				resultCh <- Result{
+					Server:   conn.Name,
+					Database: t.database,
+					Status:   StatusOK,
+				}
+				return
+			}
+
+			start := time.Now()
+			r := executeOnDB(ctx, conn, t.database, sqlContent, timeout, cfg.NoTxn)
+			r.Server = conn.Name
+			r.Database = t.database
+			r.Elapsed = time.Since(start).Round(time.Millisecond).String()
+			resultCh <- r
+		}(conn, t)
 	}
 
 	// Close when all done

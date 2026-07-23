@@ -8,7 +8,7 @@
 [defaults]
 # Connection / execution
 timeout = 30                # Query timeout in seconds (default: 30)
-concurrency = 10            # Global concurrency limit (0 = per-server max_connections)
+concurrency = 5              # Global concurrency limit (default: 5)
 no_transaction = false      # Run in autocommit mode (default: false, uses transaction)
 
 # Safety
