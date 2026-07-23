@@ -388,7 +388,8 @@ func run(ac *appConfig, cmd *cobra.Command) error {
 	mergeConfigWithCLI(ac, cmd, &cfg.Defaults)
 
 	// 3. Get SQL
-	sqlInput, err := scanner.Scan(ac.sql, ac.file, ac.edit, os.Stdin)
+	editor := cfg.Defaults.Editor
+	sqlInput, err := scanner.Scan(ac.sql, ac.file, ac.edit, os.Stdin, editor)
 	if err != nil {
 		display.PrintError(err.Error())
 		return err
@@ -450,7 +451,7 @@ func run(ac *appConfig, cmd *cobra.Command) error {
 			"# Format: server.database\n" +
 			"# To select all, just save: :wq\n\n"
 
-		selected, err := scanner.SelectFromEditor(labels, headerComment)
+		selected, err := scanner.SelectFromEditor(labels, headerComment, editor)
 		if err != nil {
 			display.PrintError(fmt.Sprintf("editor: %v", err))
 			return err

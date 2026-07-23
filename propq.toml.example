@@ -19,6 +19,11 @@ dry_run = false             # Preview targets without executing
 json = false                # Output as JSON (default: table)
 quiet = false               # Suppress progress bar and banners
 
+# Editor to use for --edit and --select modes
+# Examples: "vim", "nano", "hx", "code --wait"
+# Falls back to $VISUAL → $EDITOR → vim/nano/hx/micro when empty
+editor = "vim"
+
 # Default filters (applied when CLI flags are absent)
 server = ""                 # Default regex filter for server names
 dbfilter = ""               # Default regex filter for database names

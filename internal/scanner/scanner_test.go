@@ -6,7 +6,7 @@ import (
 )
 
 func TestScanSQLArg(t *testing.T) {
-	sql, err := Scan("SELECT 1", "", false, nil)
+	sql, err := Scan("SELECT 1", "", false, nil, "")
 	if err != nil {
 		t.Fatalf("Scan failed: %v", err)
 	}
@@ -19,7 +19,7 @@ func TestScanSQLArg(t *testing.T) {
 }
 
 func TestScanNoSource(t *testing.T) {
-	_, err := Scan("", "", false, strings.NewReader(""))
+	_, err := Scan("", "", false, strings.NewReader(""), "")
 	if err == nil {
 		t.Error("expected error for no source")
 	}

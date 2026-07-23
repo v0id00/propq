@@ -29,7 +29,8 @@ type SQL struct {
 
 // Scan determines the SQL source and reads the content.
 // Priority: --sql > -f > -e > stdin (if piped)
-func Scan(sqlStr, filePath string, editMode bool, stdin io.Reader) (*SQL, error) {
+// editorOverride forces a specific editor binary (from config); empty means auto-detect.
+func Scan(sqlStr, filePath string, editMode bool, stdin io.Reader, editorOverride string) (*SQL, error) {
 	// 1. --sql flag
 	if sqlStr != "" {
 		return &SQL{Content: sqlStr, Source: SourceArg, Label: "arg"}, nil
@@ -38,7 +39,6 @@ func Scan(sqlStr, filePath string, editMode bool, stdin io.Reader) (*SQL, error)
 	// 2. -f / --file
 	if filePath != "" {
 		if filePath == "-" {
-			// Read from stdin explicitly
 			return readStdin(stdin)
 		}
 		data, err := os.ReadFile(filePath)
@@ -54,13 +54,28 @@ func Scan(sqlStr, filePath string, editMode bool, stdin io.Reader) (*SQL, error)
 
 	// 3. -e / --edit
 	if editMode {
-		content, err := FromEditor()
+		content, err := openEditor(editorOverride, ".sql", "-- Write your SQL here (semicolons for multiple statements)\n"+
+			"-- Save and quit (:wq) to execute\n"+
+			"-- To cancel: :q!\n\n")
 		if err != nil {
 			return nil, fmt.Errorf("editor: %w", err)
 		}
 		if strings.TrimSpace(content) == "" {
 			return nil, fmt.Errorf("SQL is empty after editing")
 		}
+
+		// Strip comment lines
+		lines := strings.Split(content, "\n")
+		var cleanLines []string
+		for _, line := range lines {
+			trimmed := strings.TrimSpace(line)
+			if strings.HasPrefix(trimmed, "--") {
+				continue
+			}
+			cleanLines = append(cleanLines, trimEndComment(line, "--"))
+		}
+		content = strings.TrimSpace(strings.Join(cleanLines, "\n"))
+
 		return &SQL{Content: content, Source: SourceEditor, Label: "editor"}, nil
 	}
 
@@ -96,32 +111,32 @@ func readStdin(r io.Reader) (*SQL, error) {
 	return &SQL{Content: content, Source: SourcePipe, Label: "stdin"}, nil
 }
 
-// FromEditor opens $EDITOR (or a fallback) to let the user write/edit content.
-// Returns the edited content as a string.
-func FromEditor() (string, error) {
-	editor := findEditor()
+// openEditor opens $EDITOR (or a fallback) to let the user write/edit content.
+// editorOverride: specific editor path (from config), empty = auto-detect.
+// Returns the raw edited content (comments included).
+func openEditor(editorOverride, suffix, initialContent string) (string, error) {
+	editor := editorOverride
 	if editor == "" {
-		return "", fmt.Errorf("no editor found. Set $EDITOR or $VISUAL")
+		editor = findEditor()
+	}
+	if editor == "" {
+		return "", fmt.Errorf("no editor found. Set $EDITOR, $VISUAL, or configure editor in propq.toml")
 	}
 
-	tmpFile, err := os.CreateTemp("", "propq-*.sql")
+	tmpFile, err := os.CreateTemp("", "propq-*"+suffix)
 	if err != nil {
 		return "", fmt.Errorf("create temp file: %w", err)
 	}
 	tmpPath := tmpFile.Name()
 
-	// Write header comment
-	header := "-- Write your SQL here (semicolons for multiple statements)\n" +
-		"-- Save and quit (:wq) to execute\n" +
-		"-- To cancel: :q!\n\n"
-	if _, err := tmpFile.WriteString(header); err != nil {
+	if _, err := tmpFile.WriteString(initialContent); err != nil {
 		tmpFile.Close()
 		os.Remove(tmpPath)
 		return "", fmt.Errorf("write template: %w", err)
 	}
 	tmpFile.Close()
 
-	fmt.Fprintf(os.Stderr, "  Opening %s ... write SQL, then :wq\n", editor)
+	fmt.Fprintf(os.Stderr, "  Opening %s ... edit, then :wq\n", editor)
 
 	cmd := exec.Command(editor, tmpPath)
 	cmd.Stdin = os.Stdin
@@ -139,25 +154,16 @@ func FromEditor() (string, error) {
 		return "", fmt.Errorf("read edited file: %w", err)
 	}
 
-	// Strip comment lines starting with --
-	lines := strings.Split(string(data), "\n")
-	var cleanLines []string
-	for _, line := range lines {
-		trimmed := strings.TrimSpace(line)
-		if strings.HasPrefix(trimmed, "--") {
-			continue
-		}
-		cleanLines = append(cleanLines, trimEndComment(line, "--"))
-	}
-
-	content := strings.TrimSpace(strings.Join(cleanLines, "\n"))
-	return content, nil
+	return string(data), nil
 }
 
 // SelectFromEditor opens $EDITOR with a list of items. User deletes lines they
 // don't want, saves, and the remaining lines are returned.
-func SelectFromEditor(items []string, headerComment string) ([]string, error) {
-	editor := findEditor()
+func SelectFromEditor(items []string, headerComment, editorOverride string) ([]string, error) {
+	editor := editorOverride
+	if editor == "" {
+		editor = findEditor()
+	}
 	if editor == "" {
 		return nil, fmt.Errorf("no editor found. Set $EDITOR or $VISUAL")
 	}
@@ -216,7 +222,7 @@ func SelectFromEditor(items []string, headerComment string) ([]string, error) {
 	return selected, nil
 }
 
-// findEditor locates the user's preferred editor.
+// findEditor locates the user's preferred editor from env vars.
 func findEditor() string {
 	if e := os.Getenv("VISUAL"); e != "" {
 		return e
@@ -233,7 +239,6 @@ func findEditor() string {
 }
 
 // trimEndComment removes inline SQL comments from a line.
-// Only removes the first occurrence of the comment marker outside strings.
 func trimEndComment(line string, marker string) string {
 	if marker == "" {
 		return line

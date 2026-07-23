@@ -37,6 +37,11 @@ type Defaults struct {
 	// prompt for confirmation before hitting ALL databases.
 	// Set to false to skip confirmation and run directly.
 	ConfirmWithoutFilter bool `toml:"confirm_without_filter,omitempty"`
+
+	// Editor binary to use for --edit and --select modes.
+	// Examples: "vim", "nano", "code --wait", "/usr/bin/helix"
+	// If empty, uses $VISUAL, then $EDITOR, then vim/nano/hx/micro.
+	Editor string `toml:"editor,omitempty"`
 }
 
 // SetDefaults fills zero-valued fields with sensible defaults.
