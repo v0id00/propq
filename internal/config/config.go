@@ -124,7 +124,9 @@ func Load(path string) (*Config, error) {
 // FindConfigPath searches for a config file. Priority:
 //  1. explicit path (if non-empty)
 //  2. ./propq.toml
-//  3. ~/.config/propq/config.toml
+//  3. Platform-specific config directory:
+//     Linux/macOS: ~/.config/propq/config.toml
+//     Windows:     %APPDATA%/propq/config.toml
 func FindConfigPath(explicit string) (string, error) {
 	if explicit != "" {
 		if _, err := os.Stat(explicit); err != nil {
@@ -135,23 +137,10 @@ func FindConfigPath(explicit string) (string, error) {
 
 	candidates := []string{"propq.toml"}
 
-	// XDG config home
-	xdg := os.Getenv("XDG_CONFIG_HOME")
-	if xdg == "" {
-		home, err := os.UserHomeDir()
-		if err == nil {
-			xdg = filepath.Join(home, ".config")
-		}
-	}
-	if xdg != "" {
-		candidates = append(candidates, filepath.Join(xdg, "propq", "config.toml"))
-	}
-
-	// Fallback on Unix
-	if runtime.GOOS != "windows" {
-		if home, err := os.UserHomeDir(); err == nil {
-			candidates = append(candidates, filepath.Join(home, ".config", "propq", "config.toml"))
-		}
+	// Platform-specific config directory
+	path := PlatformConfigPath()
+	if path != "" {
+		candidates = append(candidates, path)
 	}
 
 	for _, p := range candidates {
@@ -161,6 +150,53 @@ func FindConfigPath(explicit string) (string, error) {
 	}
 
 	return "", fmt.Errorf("no config file found. Searched: %s", strings.Join(candidates, ", "))
+}
+
+// PlatformConfigPath returns the platform-specific config file path.
+func PlatformConfigPath() string {
+	if runtime.GOOS == "windows" {
+		appData := os.Getenv("APPDATA")
+		if appData == "" {
+			home, err := os.UserHomeDir()
+			if err != nil {
+				return ""
+			}
+			appData = filepath.Join(home, "AppData", "Roaming")
+		}
+		return filepath.Join(appData, "propq", "config.toml")
+	}
+
+	// Linux / macOS: XDG spec
+	xdg := os.Getenv("XDG_CONFIG_HOME")
+	if xdg == "" {
+		home, err := os.UserHomeDir()
+		if err != nil {
+			return ""
+		}
+		return filepath.Join(home, ".config", "propq", "config.toml")
+	}
+	return filepath.Join(xdg, "propq", "config.toml")
+}
+
+// DefaultExample returns a default config file content as a string.
+func DefaultExample() string {
+	return `# propq.toml — v0id00/propq configuration
+# See https://github.com/v0id00/propq for full documentation.
+
+[defaults]
+timeout = 30
+concurrency = 5
+confirm_without_filter = true
+editor = "vim"
+
+[connections.local]
+host = "127.0.0.1"
+port = 3306
+user = "root"
+password = ""
+max_connections = 3
+tags = ["dev"]
+`
 }
 
 // ExpandPath expands ~ to the user's home directory.

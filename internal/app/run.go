@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"regexp"
 	"sort"
 	"strings"
@@ -153,16 +154,17 @@ SQL sources (in priority order):
 }
 
 // ---------------------------------------------------------------------------
-// propq config check  —  validate configuration and test server connectivity
+// propq config  —  check, validate, generate config
 // ---------------------------------------------------------------------------
 
 func newConfigCmd() *cobra.Command {
-	var cfgPath string
-
 	cmd := &cobra.Command{
 		Use:   "config",
-		Short: "Validate configuration and test server connections",
+		Short: "Manage configuration (check, generate, validate)",
 	}
+
+	// Shared -c flag used by all subcommands
+	var cfgPath string
 
 	checkCmd := &cobra.Command{
 		Use:   "check",
@@ -177,8 +179,98 @@ Exits with 0 if all servers are reachable, 1 otherwise.`,
 	}
 	checkCmd.Flags().StringVarP(&cfgPath, "config", "c", "", "Path to config file")
 
+	generateCmd := &cobra.Command{
+		Use:   "generate",
+		Short: "Generate a default config file",
+		Long: `Generate a default config file with example settings.
+
+With -o/--output: writes to the given path.
+Without -o: writes to the platform config directory.
+  Linux/macOS: ~/.config/propq/config.toml
+  Windows:     %APPDATA%/propq/config.toml
+Use -o - to print to stdout.`,
+		RunE: func(cmd *cobra.Command, args []string) error {
+			oPath, _ := cmd.Flags().GetString("output")
+			return runConfigGenerate(oPath)
+		},
+	}
+	generateCmd.Flags().StringP("output", "o", "", "Output path (default: platform config dir, '-' for stdout)")
+
+	validateCmd := &cobra.Command{
+		Use:   "validate",
+		Short: "Validate config file syntax and structure",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			return runConfigValidate(cfgPath)
+		},
+	}
+	validateCmd.Flags().StringVarP(&cfgPath, "config", "c", "", "Path to config file")
+
 	cmd.AddCommand(checkCmd)
+	cmd.AddCommand(generateCmd)
+	cmd.AddCommand(validateCmd)
 	return cmd
+}
+
+// runConfigGenerate writes a default config file.
+func runConfigGenerate(outputPath string) error {
+	if outputPath == "" {
+		outputPath = config.PlatformConfigPath()
+		if outputPath == "" {
+			return fmt.Errorf("could not determine platform config directory")
+		}
+		fmt.Fprintf(os.Stderr, "  Writing to %s\n", outputPath)
+	}
+
+	content := config.DefaultExample()
+
+	if outputPath == "-" {
+		fmt.Print(content)
+		return nil
+	}
+
+	dir := filepath.Dir(outputPath)
+	if err := os.MkdirAll(dir, 0755); err != nil {
+		return fmt.Errorf("create directory %s: %w", dir, err)
+	}
+
+	if err := os.WriteFile(outputPath, []byte(content), 0644); err != nil {
+		return fmt.Errorf("write config: %w", err)
+	}
+
+	fmt.Fprintf(os.Stderr, "  ✓ Config file created at %s\n", outputPath)
+	fmt.Fprintf(os.Stderr, "    Edit it with: vim %s\n", outputPath)
+	return nil
+}
+
+// runConfigValidate checks config file syntax and structure.
+func runConfigValidate(cfgPath string) error {
+	path, err := config.FindConfigPath(cfgPath)
+	if err != nil {
+		return err
+	}
+
+	fmt.Fprintf(os.Stderr, "  ✓ Config file found: %s\n", path)
+
+	cfg, err := config.Load(path)
+	if err != nil {
+		return fmt.Errorf("config parse error: %w", err)
+	}
+
+	if len(cfg.Connections) == 0 {
+		fmt.Fprintf(os.Stderr, "  ⚠ No connections defined in config\n")
+	} else {
+		fmt.Fprintf(os.Stderr, "  ✓ %d connections defined\n", len(cfg.Connections))
+		for name, conn := range cfg.Connections {
+			if conn.Host == "" || conn.User == "" {
+				fmt.Fprintf(os.Stderr, "  ⚠ %s: missing host or user\n", name)
+			} else {
+				fmt.Fprintf(os.Stderr, "  ✓ %s → %s:%d\n", name, conn.Host, conn.Port)
+			}
+		}
+	}
+
+	fmt.Fprintf(os.Stderr, "  ✓ Config is valid\n")
+	return nil
 }
 
 func runConfigCheck(cfgPath string) error {
