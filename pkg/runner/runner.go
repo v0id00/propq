@@ -13,7 +13,7 @@ import (
 
 	_ "github.com/go-sql-driver/mysql"
 	"github.com/schollz/progressbar/v3"
-	"github.com/v0id00/propq/internal/config"
+	"github.com/v0id00/propq/pkg/config"
 )
 
 // Status describes the result of a single database execution.

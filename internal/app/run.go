@@ -19,11 +19,11 @@ import (
 
 	"github.com/fatih/color"
 	"github.com/spf13/cobra"
-	"github.com/v0id00/propq/internal/config"
-	"github.com/v0id00/propq/internal/display"
-	"github.com/v0id00/propq/internal/history"
-	"github.com/v0id00/propq/internal/runner"
-	"github.com/v0id00/propq/internal/scanner"
+	"github.com/v0id00/propq/pkg/config"
+	"github.com/v0id00/propq/pkg/display"
+	"github.com/v0id00/propq/pkg/history"
+	"github.com/v0id00/propq/pkg/runner"
+	"github.com/v0id00/propq/pkg/scanner"
 )
 
 // version is set at build time via -ldflags.

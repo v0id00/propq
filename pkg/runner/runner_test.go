@@ -3,7 +3,7 @@ package runner
 import (
 	"testing"
 
-	"github.com/v0id00/propq/internal/config"
+	"github.com/v0id00/propq/pkg/config"
 )
 
 func TestFilterServers(t *testing.T) {

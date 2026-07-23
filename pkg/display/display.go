@@ -10,7 +10,7 @@ import (
 	"text/tabwriter"
 
 	"github.com/fatih/color"
-	"github.com/v0id00/propq/internal/runner"
+	"github.com/v0id00/propq/pkg/runner"
 )
 
 // ──   Styles   ──────────────────────────────────────────────
