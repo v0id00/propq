@@ -60,6 +60,9 @@ type appConfig struct {
 	outputFile  string
 	stream      bool
 	history     bool
+	noOutput    bool
+	noError     bool
+	noResult    bool
 }
 
 func newRootCmd() *cobra.Command {
@@ -119,6 +122,9 @@ SQL sources (in priority order):
 	flags.BoolVar(&ac.json, "json", false, "Output as JSON (default: table)")
 	flags.StringVarP(&ac.outputFile, "output", "o", "", "Save output to file (in addition to stdout)")
 	flags.BoolVar(&ac.stream, "stream", false, "Print results live as they complete")
+	flags.BoolVarP(&ac.noOutput, "no-output", "N", false, "Suppress result output, show only summary")
+	flags.BoolVar(&ac.noError, "no-error", false, "Hide error entries from output")
+	flags.BoolVar(&ac.noResult, "no-result", false, "Hide data rows, show only ✓/✗ per target")
 	flags.BoolVarP(&ac.noProgress, "quiet", "q", false, "Suppress progress bar and banners")
 	flags.BoolVar(&ac.noConfirm, "no-confirm", false, "Skip confirmation prompt when no filter is set")
 
@@ -601,6 +607,18 @@ func run(ac *appConfig, cmd *cobra.Command) error {
 	}
 	if ac.stream {
 		runCfg.OnResult = display.PrintStreamResult
+		if ac.noError || ac.noResult {
+			origCallback := runCfg.OnResult
+			runCfg.OnResult = func(r runner.Result) {
+				if ac.noError && r.Status == runner.StatusError {
+					return
+				}
+				if ac.noResult {
+					r.Rows = nil
+				}
+				origCallback(r)
+			}
+		}
 	}
 	if ac.selectMode {
 		runCfg.Targets = selectedTargets
@@ -618,16 +636,25 @@ func run(ac *appConfig, cmd *cobra.Command) error {
 
 	// 8. Output
 	if ac.stream {
-		// Results were already printed live by the runner
+		// Results were already printed live
+		if ac.noOutput {
+			display.PrintDone(countOK(results), countERR(results))
+		}
+	} else if ac.noOutput {
+		// Only show summary
+		display.PrintDone(countOK(results), countERR(results))
 	} else if ac.json {
-		rendered := display.RenderJSON(results)
+		// Filter results for no-error / no-result
+		out := filterResults(results, ac.noError, ac.noResult)
+		rendered := display.RenderJSON(out)
 		os.Stdout.WriteString(rendered)
 		if ac.outputFile != "" {
 			os.WriteFile(ac.outputFile, []byte(rendered), 0644)
 			display.PrintSaved(ac.outputFile)
 		}
 	} else {
-		rendered := display.RenderTable(results)
+		out := filterResults(results, ac.noError, ac.noResult)
+		rendered := display.RenderTable(out)
 		os.Stdout.WriteString(rendered)
 		if ac.outputFile != "" {
 			os.WriteFile(ac.outputFile, []byte(rendered), 0644)
@@ -636,6 +663,44 @@ func run(ac *appConfig, cmd *cobra.Command) error {
 	}
 
 	return nil
+}
+
+func countOK(results []runner.Result) int {
+	n := 0
+	for _, r := range results {
+		if r.Status == runner.StatusOK {
+			n++
+		}
+	}
+	return n
+}
+
+func countERR(results []runner.Result) int {
+	n := 0
+	for _, r := range results {
+		if r.Status == runner.StatusError {
+			n++
+		}
+	}
+	return n
+}
+
+// filterResults filters results based on noError and noResult flags.
+func filterResults(results []runner.Result, noError, noResult bool) []runner.Result {
+	if !noError && !noResult {
+		return results
+	}
+	var out []runner.Result
+	for _, r := range results {
+		if noError && r.Status == runner.StatusError {
+			continue
+		}
+		if noResult {
+			r.Rows = nil
+		}
+		out = append(out, r)
+	}
+	return out
 }
 
 // mergeConfigWithCLI applies config defaults for any flag NOT explicitly
