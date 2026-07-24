@@ -79,7 +79,7 @@ propq --json -s "www1|www6" --sql "SELECT version()" --stream      # live stream
 | -N, --no-output | Suppress rows, show only summary |
 | --no-error | Hide error entries |
 | --no-result | Hide data rows, show only status |
-| -q, --quiet | Suppress banners and progress |
+| -q, --quiet | Suppress spinner and banners |
 
 ### Config
 | Flag | Description |

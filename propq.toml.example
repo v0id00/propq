@@ -17,7 +17,7 @@ dry_run = false             # Preview targets without executing
 
 # Output
 json = false                # Output as JSON (default: table)
-quiet = false               # Suppress progress bar and banners
+quiet = false               # Suppress spinner and banners
 
 # Editor to use for --edit and --select modes
 # Examples: "vim", "nano", "hx", "code --wait"

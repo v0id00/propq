@@ -134,7 +134,7 @@ SQL sources (in priority order):
 	flags.BoolVarP(&ac.noOutput, "no-output", "N", false, "Suppress result output, show only summary")
 	flags.BoolVar(&ac.noError, "no-error", false, "Hide error entries from output")
 	flags.BoolVar(&ac.noResult, "no-result", false, "Hide data rows, show only ✓/✗ per target")
-	flags.BoolVarP(&ac.noProgress, "quiet", "q", false, "Suppress progress bar and banners")
+	flags.BoolVarP(&ac.noProgress, "quiet", "q", false, "Suppress spinner and banners")
 	flags.BoolVar(&ac.noConfirm, "no-confirm", false, "Skip confirmation prompt when no filter is set")
 
 	// Config
