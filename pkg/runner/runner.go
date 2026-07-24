@@ -12,7 +12,6 @@ import (
 	"time"
 
 	_ "github.com/go-sql-driver/mysql"
-	"github.com/schollz/progressbar/v3"
 	"github.com/v0id00/propq/pkg/config"
 )
 
@@ -157,9 +156,13 @@ func Run(conns []config.Connection, sqlContent string, cfg RunConfig) ([]Result,
 		serverSems[c.Name] = make(chan struct{}, limit)
 	}
 
-	// Progress bar
+	// Progress spinner
 	totalTasks := len(targets)
-	bar := buildProgressBar(totalTasks, cfg.ShowBar, "Executing")
+	var spin *Spinner
+	if cfg.ShowBar {
+		spin = NewSpinner(true, "Executing", totalTasks)
+		spin.Start()
+	}
 
 	// Channels for cancellation and results
 	ctx, cancel := context.WithCancel(context.Background())
@@ -183,8 +186,8 @@ func Run(conns []config.Connection, sqlContent string, cfg RunConfig) ([]Result,
 			go func(conn config.Connection, t target, sem chan struct{}) {
 				defer wg.Done()
 				defer func() {
-					if bar != nil {
-						bar.Add(1)
+					if spin != nil {
+						spin.Inc()
 					}
 				}()
 
@@ -236,9 +239,8 @@ func Run(conns []config.Connection, sqlContent string, cfg RunConfig) ([]Result,
 		}
 	}
 
-	if bar != nil {
-		bar.Finish()
-		fmt.Fprintln(os.Stderr)
+	if spin != nil {
+		spin.Stop()
 	}
 
 	return results, nil
@@ -693,8 +695,12 @@ func runOncePerServer(conns []config.Connection, sqlContent string, cfg RunConfi
 		serverSems[c.Name] = &semSlot{ch: make(chan struct{}, maxConn)}
 	}
 
-	// Progress bar
-	bar := buildProgressBar(len(conns), cfg.ShowBar, " Servers")
+	// Progress spinner
+	var spin *Spinner
+	if cfg.ShowBar {
+		spin = NewSpinner(true, "Servers", len(conns))
+		spin.Start()
+	}
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -707,8 +713,8 @@ func runOncePerServer(conns []config.Connection, sqlContent string, cfg RunConfi
 		go func(conn config.Connection) {
 			defer wg.Done()
 			defer func() {
-				if bar != nil {
-					bar.Add(1)
+				if spin != nil {
+					spin.Inc()
 				}
 			}()
 
@@ -750,31 +756,14 @@ func runOncePerServer(conns []config.Connection, sqlContent string, cfg RunConfi
 		}
 	}
 
-	if bar != nil {
-		bar.Finish()
-		fmt.Fprintln(os.Stderr)
+	if spin != nil {
+		spin.Stop()
 	}
 
 	return results, nil
 }
 
-// buildProgressBar creates a new progress bar if conditions are met.
-func buildProgressBar(total int, show bool, label string) *progressbar.ProgressBar {
-	if !show || total == 0 || !isTerminal() {
-		return nil
-	}
-	return progressbar.NewOptions(total,
-		progressbar.OptionSetDescription(" "+label),
-		progressbar.OptionSetWriter(os.Stderr),
-		progressbar.OptionShowCount(),
-		progressbar.OptionThrottle(65*time.Millisecond),
-		progressbar.OptionSpinnerType(14),
-		progressbar.OptionFullWidth(),
-		progressbar.OptionSetRenderBlankState(true),
-	)
-}
-
-// isTerminal returns true if stderr is a terminal (for progress bar).
+// isTerminal returns true if stderr is a terminal (for spinner display).
 func isTerminal() bool {
 	stat, _ := os.Stderr.Stat()
 	return (stat.Mode() & os.ModeCharDevice) != 0
