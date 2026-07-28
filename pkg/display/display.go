@@ -5,13 +5,81 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
+	"io"
 	"os"
+	"os/exec"
 	"strings"
 	"text/tabwriter"
 
 	"github.com/fatih/color"
+	"github.com/mattn/go-isatty"
 	"github.com/v0id00/propq/pkg/runner"
 )
+
+// ──   Pager   ────────────────────────────────────────────────
+
+// Pager wraps stdout through an external pager (less by default).
+// Provides search (/), scroll, and navigation for long outputs.
+type Pager struct {
+	cmd    *exec.Cmd
+	w      io.WriteCloser
+	active bool
+}
+
+// StartPager starts the system pager if usePager is true and stdout is a
+// terminal.  If paging is disabled or unavailable, writes go directly to
+// os.Stdout.  Must be paired with a call to Close() after all output is written.
+func StartPager(usePager bool) *Pager {
+	needsPager := usePager && isTerminal()
+	if !needsPager {
+		return &Pager{w: nopCloser{os.Stdout}}
+	}
+
+	pagerCmd := os.Getenv("PAGER")
+	var args []string
+	if pagerCmd == "" || pagerCmd == "less" {
+		args = []string{"less", "-SRFX"}
+	} else {
+		args = strings.Fields(pagerCmd)
+	}
+
+	cmd := exec.Command(args[0], args[1:]...)
+	cmd.Stderr = os.Stderr
+	cmd.Stdout = os.Stdout
+
+	wc, err := cmd.StdinPipe()
+	if err != nil {
+		return &Pager{w: nopCloser{os.Stdout}}
+	}
+	if err := cmd.Start(); err != nil {
+		return &Pager{w: nopCloser{os.Stdout}}
+	}
+
+	return &Pager{cmd: cmd, w: wc, active: true}
+}
+
+// Write writes data to the pager or directly to stdout.
+func (p *Pager) Write(b []byte) (int, error) { return p.w.Write(b) }
+
+// WriteString is a convenience wrapper.
+func (p *Pager) WriteString(s string) (int, error) { return io.WriteString(p.w, s) }
+
+// Close waits for the pager process to finish.  Always call after writing.
+func (p *Pager) Close() error {
+	if !p.active {
+		return nil
+	}
+	p.w.Close()
+	return p.cmd.Wait()
+}
+
+func isTerminal() bool {
+	return isatty.IsTerminal(os.Stdout.Fd())
+}
+
+type nopCloser struct{ io.Writer }
+
+func (nopCloser) Close() error { return nil }
 
 // ──   Styles   ──────────────────────────────────────────────
 

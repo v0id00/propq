@@ -68,6 +68,8 @@ type appConfig struct {
 	noResult    bool
 	askCommit   bool
 	tags        string
+	pager       bool
+	noPager     bool
 }
 
 func newRootCmd() *cobra.Command {
@@ -136,6 +138,8 @@ SQL sources (in priority order):
 	flags.BoolVar(&ac.noResult, "no-result", false, "Hide data rows, show only ✓/✗ per target")
 	flags.BoolVarP(&ac.noProgress, "quiet", "q", false, "Suppress spinner and banners")
 	flags.BoolVar(&ac.noConfirm, "no-confirm", false, "Skip confirmation prompt when no filter is set")
+	flags.BoolVar(&ac.pager, "pager", false, "Force pager output (less) even when stdout is piped")
+	flags.BoolVar(&ac.noPager, "no-pager", false, "Disable pager output")
 
 	// Config
 	flags.StringVarP(&ac.configPath, "config", "c", "", "Path to config file")
@@ -889,6 +893,11 @@ func run(ac *appConfig, cmd *cobra.Command) error {
 	}
 
 	// 10. Output
+	usePager := !ac.noPager && !ac.stream
+	if ac.pager {
+		usePager = true
+	}
+
 	if ac.stream && ac.noOutput {
 		display.PrintDone(countOK(results), countERR(results))
 	} else if ac.noOutput {
@@ -903,7 +912,11 @@ func run(ac *appConfig, cmd *cobra.Command) error {
 		} else {
 			rendered = display.RenderTable(out)
 		}
-		os.Stdout.WriteString(rendered)
+
+		p := display.StartPager(usePager)
+		p.WriteString(rendered)
+		p.Close()
+
 		if ac.outputFile != "" {
 			os.WriteFile(ac.outputFile, []byte(rendered), 0644)
 			display.PrintSaved(ac.outputFile)

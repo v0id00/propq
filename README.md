@@ -84,7 +84,8 @@ propq completion zsh | sudo tee /usr/local/share/zsh/site-functions/_propq
 - ⚡ **Async execution** — goroutine pool, per-server semaphores, default per-server mode (fast)
 - 📥 **4 SQL sources** — inline (`--sql`), file (`-f`), pipe (stdin), editor (`-e`)
 - 🎯 **Smart filtering** — regex on server names (`-s`), database names (`-d`), exclude (`-D`), tags (`-t`)
-- 📊 **Multiple output formats** — table (human), `--json` (AI/scripts), `--csv` (Excel)
+|- 📊 **Multiple output formats** — table (human), `--json` (AI/scripts), `--csv` (Excel)
+|- 📖 **Pager integration** — auto-pages through `less -SRFX` for search & scroll; `--no-pager` to disable
 - 🛡️ **Safety first** — destructive SQL requires `--force`, no-filter warning, `--ask-for-commit`
 - 🔄 **Retry** — `--retry N` with exponential backoff for flaky connections
 - 📜 **Query history** — `--history` shows recent queries, editor template includes history
@@ -160,8 +161,10 @@ propq --json -o results.json --sql "SELECT * FROM users"
 | `--stream` | Print results live |
 | `--history` | Show recent queries |
 | `-N, --no-output` | Suppress results, show only summary |
-| `--no-error` | Hide error entries |
-| `--no-result` | Hide data rows, show only status |
+| `--no-error` | Hide error entries from output |
+| `--no-result` | Hide data rows, show only ✓/✗ per target |
+| `--pager` | Force pager output (less) even when piped |
+| `--no-pager` | Disable auto-pager (default: auto when stdout is a TTY) |
 | `-q, --quiet` | Suppress banners and progress |
 
 ### Config
