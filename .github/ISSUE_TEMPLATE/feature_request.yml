@@ -1,0 +1,32 @@
+name: Feature request
+description: Suggest a new flag, subcommand, or behavior
+labels: [enhancement]
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem
+      description: What are you trying to do that propq can't do today? Describe the workflow, not just the feature.
+    validations:
+      required: true
+  - type: textarea
+    id: solution
+    attributes:
+      label: Proposed solution
+      description: How should it work? Consider propq's conventions — flags, config keys, output formats.
+    validations:
+      required: true
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives considered
+      description: Other approaches you tried or thought of.
+  - type: checkboxes
+    id: scope
+    attributes:
+      label: Impact
+      options:
+        - label: Changes CLI flags or subcommands
+        - label: Changes config file format
+        - label: Changes output format (table/JSON/CSV)
+        - label: Affects safety behavior (--force, destructive SQL, transactions)

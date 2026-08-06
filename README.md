@@ -264,6 +264,10 @@ SQL → Scanner → Config → Runner → Display → stdout
 4. **Runner** executes concurrently with per-server semaphores, retries on failure
 5. **Display** formats results as table, JSON, or CSV
 
+## Contributing
+
+See [CONTRIBUTING.md](CONTRIBUTING.md) for guidelines, commit conventions, and the safety checklist. Bugs and feature requests go to [issues](https://github.com/v0id00/propq/issues); security issues go through the [Security Policy](SECURITY.md).
+
 ## Development
 
 ```bash
