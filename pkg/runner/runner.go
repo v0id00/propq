@@ -68,6 +68,11 @@ type RunConfig struct {
 	All         bool        // run on ALL databases (per-DB mode); default: once per server
 	Stream      bool         // print results live as they complete
 	OnResult    func(Result) // optional callback for each result (streaming)
+	// OnStart is called with (server, database) immediately before that
+	// database's SQL actually begins executing (after the per-server
+	// semaphore slot is taken, so it reflects what is really running).
+	// Callers use it to show live "currently running" progress.
+	OnStart     func(server, db string)
 	AskCommit   bool        // per-target confirmation before executing
 	SQLText     string      // SQL text shown in ask-commit prompt
 	Retry       int         // retry failed databases N times
@@ -215,6 +220,9 @@ func Run(conns []config.Connection, sqlContent string, cfg RunConfig) ([]Result,
 				}
 
 				start := time.Now()
+				if cfg.OnStart != nil {
+					cfg.OnStart(conn.Name, t.database)
+				}
 				r := executeOnDBLikeDBRunner(ctx, conn, t.database, sqlContent, timeout, cfg.Retry, cfg.NoTxn)
 				r.Server = conn.Name
 				r.Database = t.database
@@ -735,6 +743,9 @@ func runOncePerServer(conns []config.Connection, sqlContent string, cfg RunConfi
 			}
 
 			start := time.Now()
+			if cfg.OnStart != nil {
+				cfg.OnStart(conn.Name, "*")
+			}
 			r := executeOnDBLikeDBRunner(ctx, conn, "*", sqlContent, timeout, cfg.Retry, cfg.NoTxn)
 			r.Server = conn.Name
 			r.Database = "*"
